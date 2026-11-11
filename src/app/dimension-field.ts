@@ -47,9 +47,23 @@ export class CadDimensionField extends LitElement {
 
 	protected firstUpdated(): void {
 		this.input = this.renderRoot.querySelector("input");
-		if (this.input && this.mm !== undefined) this.input.value = String(this.mm);
+		this.syncValue();
 		// A tablet user's next tap is the keyboard they have not opened yet: the field takes focus as it appears.
 		if (this.open) this.input?.focus();
+	}
+
+	protected updated(): void {
+		this.syncValue();
+	}
+
+	/** Show the depth the host remembers, but never over what is being typed. */
+	private syncValue(): void {
+		// Why this is not just in firstUpdated: Lit runs a child's first update while the child is still detached,
+		// and the parent's `.mm=${…}` property part lands after. Task 10 made the remembered depth flow in — a rail
+		// commit of 25 mm followed by E used to open a blank box, and Enter then reported "type a depth" because
+		// the number the field handed back was Number("").
+		const input = this.input ?? (this.input = this.renderRoot.querySelector("input"));
+		if (input && this.mm !== undefined && input.value.trim() === "") input.value = String(this.mm);
 	}
 
 	/** Focus the number, for the parent that just opened us. Lit runs a child's first update while the child is

@@ -176,6 +176,17 @@ export class CadViewer extends LitElement {
 		return { theta: v?.theta ?? 0, phi: v?.phi ?? 0, target: [v?.target[0] ?? 0, v?.target[1] ?? 0, v?.target[2] ?? 0] };
 	}
 
+	/** Points the camera at an axis, for the tool panel's four view buttons. It goes through the same `view()`
+	 *  path a gesture uses, so the frame that follows is drawn rather than waiting for the next pointer move.
+	 *  This is a *direction*: it does not change the framing, which is `fit()`'s job and the fit button's only
+	 *  reason to exist. */
+	setView(orbit: { theta: number; phi: number }): void {
+		this.view((v) => {
+			v.theta = orbit.theta;
+			v.phi = orbit.phi;
+		});
+	}
+
 	/** Client px → mm on `plane`, through the same camera that drew the pixel the pencil is on. The sketch tool
 	 *  converts strokes with this and needs nothing else of the scene, so `scene` stays private (and the e2e's
 	 *  `viewer["scene"]` reaches-in stays in the e2e). A NaN pair means the ray never meets the plane. */
@@ -183,12 +194,15 @@ export class CadViewer extends LitElement {
 		return this.scene?.screenToPlane(clientX, clientY, plane) ?? [Number.NaN, Number.NaN];
 	}
 
-	/** Frames the whole part. Called the first time real geometry lands, and by the tool panel's Fit. */
-	fit(): void {
-		if (!this.scene) return;
+	/** Frames the whole part. Called the first time real geometry lands, and by the tool panel's Fit.
+	 *  False when there is nothing to frame: a 0-box fit parks the eye millimetres from the origin, which reads
+	 *  as a broken canvas rather than as an empty model. */
+	fit(): boolean {
+		if (!this.scene || this.mesh.faceCount === 0) return false;
 		this.scene.fit(meshBounds(this.mesh));
-		this.fitted = this.mesh.faceCount > 0;
+		this.fitted = true;
 		this.invalidate();
+		return true;
 	}
 
 	private invalidate(): void {

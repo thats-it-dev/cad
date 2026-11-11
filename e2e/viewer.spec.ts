@@ -83,12 +83,19 @@ test("<cad-viewer> fills the page with two aligned canvases", async ({ page }) =
 
 	const model = (await page.evaluate(geometryOf("model"))) as { x: number; y: number; w: number; h: number; px: number; py: number };
 	const ink = (await page.evaluate(geometryOf("ink"))) as typeof model;
-	expect(model.w, "the model canvas spans the working area").toBeGreaterThanOrEqual(300);
-	expect(model.h).toBeGreaterThanOrEqual(300);
+	// The claim is "the canvas owns the working area", which is a ratio, not a pixel count: Task 10 put a
+	// 64 px rail on the left, and an absolute 300 px floor that had nothing to do with the viewport size
+	// failed on a 390 px phone for the right reason — the working area there really is smaller.
+	const box = (await page.evaluate(`(() => { const r = document.querySelector("app-main").shadowRoot.querySelector(".stage").getBoundingClientRect(); return [r.width, r.height]; })()`)) as [number, number];
+	expect(model.w, "the model canvas spans the working area").toBeGreaterThanOrEqual(box[0] * 0.95);
+	expect(model.h, "and the height of it too").toBeGreaterThanOrEqual(box[1] * 0.95);
+	expect(model.w * model.h, "and it is not a sliver").toBeGreaterThan(390 * 300 * 0.5);
 	expect(ink, "the ink layer is the same box, so ink cannot drift off the model").toEqual(model);
-	// The bar row took the top of the page in Task 9, so the canvas is no longer at (0, 0). What still has to
-	// hold — and what the ink's coordinate space depends on — is that the two canvases share one box.
-	expect([model.x, model.y], "that box is inside the viewport, wherever the toolbar left it").toEqual([0, expect.any(Number)]);
+	// The rail took the left of the page and the bar took the top, so the canvas is no longer at (0, 0). What
+	// still has to hold — and what the ink's coordinate space depends on — is that the two canvases share one
+	// box, wherever the layout put it.
+	expect(model.x, "the canvas starts to the right of the rail, not under it").toBeGreaterThanOrEqual(0);
+	expect(model.y, "and below the bar").toBeGreaterThanOrEqual(0);
 });
 
 test("both canvases refuse the browser's own gestures", async ({ page }) => {
@@ -141,9 +148,13 @@ test("the pen's stroke lands on the ink layer, and reports its phases", async ({
 		const c = ${CANVAS("model")};
 		const seen = [];
 		${V}.__CAD_VIEWER__.addEventListener("cad-stroke", (e) => seen.push(e.detail.phase + ":" + e.detail.pointerType));
-		// page.mouse cannot report pointerType "pen", so the pen's events are dispatched, not synthesised.
+		// page.mouse cannot report pointerType "pen", so the pen's events are dispatched, not synthesised. The
+		// ring is a fraction of the canvas, because the rail and the bar move the canvas and an absolute (40, 40)
+		// would land on the tool panel on a narrow viewport.
 		const fire = (type, x, y) => c.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId: 7, pointerType: "pen", isPrimary: true, clientX: x, clientY: y }));
-		const ring = [[40, 40], [140, 60], [160, 160], [60, 150], [40, 40]];
+		const bx = c.getBoundingClientRect();
+		const at = (fx, fy) => [bx.left + fx * bx.width, bx.top + fy * bx.height];
+		const ring = [[0.1, 0.1], [0.6, 0.18], [0.68, 0.62], [0.2, 0.58], [0.1, 0.1]].map((p) => at(p[0], p[1]));
 		fire("pointerdown", ...ring[0]);
 		for (const p of ring.slice(1)) fire("pointermove", ...p);
 		return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve({ seen, painted: ${inkPixels} }))));
@@ -152,7 +163,10 @@ test("the pen's stroke lands on the ink layer, and reports its phases", async ({
 	expect(down.painted.different, "ink is drawn on the 2D layer while the stroke is live").toBeGreaterThan(0);
 	const after = await page.evaluate(`(() => {
 		const c = ${CANVAS("model")};
-		c.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 7, pointerType: "pen", isPrimary: true, clientX: 40, clientY: 40 }));
+		// Recomputed here: each page.evaluate is its own scope, and bx belonged to the block that drew the ring.
+		// The lift has to land on the ring's first corner, which is what closes it.
+		const bx = c.getBoundingClientRect();
+		c.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 7, pointerType: "pen", isPrimary: true, clientX: bx.left + 0.1 * bx.width, clientY: bx.top + 0.1 * bx.height }));
 		return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve({ painted: ${inkPixels}, ink: ${V}.__CAD_VIEWER__.ink.length }))));
 	})()`) as { painted: { painted: number; different: number }; ink: number };
 	// What remains after the lift is not the stroke: it is the entity the app committed from it, drawn through
@@ -164,7 +178,9 @@ test("the pen's stroke lands on the ink layer, and reports its phases", async ({
 	const second = await page.evaluate(`(() => {
 		const c = ${CANVAS("model")};
 		const fire = (type, x, y) => c.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId: 8, pointerType: "pen", isPrimary: true, clientX: x, clientY: y }));
-		const ring = [[240, 240], [340, 250], [350, 340], [240, 240]];
+		const bx = c.getBoundingClientRect();
+		const at = (fx, fy) => [bx.left + fx * bx.width, bx.top + fy * bx.height];
+		const ring = [[0.3, 0.3], [0.8, 0.34], [0.82, 0.8], [0.3, 0.3]].map((p) => at(p[0], p[1]));
 		fire("pointerdown", ...ring[0]);
 		for (const p of ring.slice(1)) fire("pointermove", ...p);
 		fire("pointerup", ...ring[ring.length - 1]);
@@ -181,13 +197,15 @@ test("a mouse drag orbits, and release snaps only when the camera is near an axi
 	const quarter = Math.PI / 2;
 	const nearAxis = (v: number) => Math.abs(v / quarter - Math.round(v / quarter)) < 0.02;
 	const drag = async (dx: number, dy: number) => {
-		await page.mouse.move(220, 220);
+		await page.mouse.move(centre[0], centre[1]);
 		await page.mouse.down();
-		await page.mouse.move(220 + dx, 220 + dy, { steps: 6 });
+		await page.mouse.move(centre[0] + dx, centre[1] + dy, { steps: 6 });
 		const during = await camera();
 		await page.mouse.up();
 		return { during, after: await camera() };
 	};
+	// Canvas-relative, for the same reason as the pen ring above: the rail moved the canvas off x = 0.
+	const centre = (await page.evaluate(`(() => { const r = ${CANVAS("model")}.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`)) as [number, number];
 
 	const first = await camera();
 	// The browser's half of the snap contract, which is the part a unit test cannot make: whatever the release

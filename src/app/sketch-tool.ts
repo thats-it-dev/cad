@@ -15,6 +15,7 @@
 import type { Entity, PlaneRef, Step } from "../model/types.ts";
 import type { Umm } from "../model/units.ts";
 import { insertExtrude, newDocument, newId, stepById } from "../model/doc.ts";
+import { assertDepth, type Pending } from "./doc-state.ts";
 import { isClosed, toEntities, type Map2 } from "../sketch/entities.ts";
 import { frameFor, frameFromNormal, type Frame2, type Vec3 } from "../sketch/frame.ts";
 import type { InkPoint } from "../view/gestures.ts";
@@ -35,10 +36,28 @@ export type SketchSession = {
 	stroke(points: InkPoint[]): void;
 	/** What the strokes so far became, in plane µm in `frame`: the ink to show while the sketch is pending. */
 	entities(): Entity[];
+	/**
+	 * The sketch as the document wants it, checks and all, without consuming it. Task 10 added this so the
+	 * panel and the keyboard commit through `DocState` and share one set of rules: a ring must close, must not
+	 * cross itself, and must not be empty. Throwing here leaves the strokes in place, so a refusal costs the
+	 * user nothing but the mistake.
+	 */
+	sketch(): Pending;
+	/** The same snapshot before the rules are applied: what to show as ink while the sketch is unfinished, and
+	 *  null when there is nothing drawn. `sketch()` throws where this returns, because the panel has to render a
+	 *  half-finished drawing without treating it as an error. */
+	pending(): Pending | null;
 	/** Close the sketch into a step, consuming it, so Extrude twice is one step and not two. */
 	commit(depthUmm: Umm, cut: boolean): Extrude;
 	/** Throw the pending sketch away. The session stays open for the next stroke. */
 	cancel(): void;
+	/**
+	 * Forget the strokes, because a step was made from them. `cancel` and this differ only in why, but the
+	 * difference is the double-commit: a commit that consumed the panel's pending sketch and left the session
+	 * holding the ring would let a second press build the same solid again. Task 10's e2e caught exactly that
+	 * — three steps from a body, a cut, and one stale tap.
+	 */
+	consume(): void;
 };
 
 /** Points are plane mm by the time they reach `toEntities`, so the map scales and offsets by nothing. */
@@ -102,14 +121,23 @@ export function startSketch(plane: PlaneRef, host: { origin: Vec3; normal: Vec3 
 		entities() {
 			return entitiesOf(strokes);
 		},
-		commit(depthUmm, cut) {
-			const entities = entitiesOf(strokes);
-			if (entities.length === 0) throw new Error("nothing to sketch");
+		sketch() {
+			const pending = this.pending();
+			if (!pending) throw new Error("nothing to sketch");
 			if (strokes.some((s) => !s.closed)) throw new Error("the ring did not close: come back to the start");
-			if (entities.some((e) => e.kind === "poly" && crossesItself(e.points))) throw new Error("the ring crosses itself: lift the pen and start again");
-			if (!Number.isInteger(depthUmm) || depthUmm <= 0) throw new Error("the depth must be a whole positive number of micrometres");
-			const sketch = { id: newId("sketch"), plane, origin: [0, 0] as [Umm, Umm], axes: axesOf(frame), entities };
+			if (pending.entities.some((e) => e.kind === "poly" && crossesItself(e.points))) throw new Error("the ring crosses itself: lift the pen and start again");
+			return pending;
+		},
+		pending() {
+			const entities = entitiesOf(strokes);
+			if (entities.length === 0) return null;
+			return { plane, origin: [0, 0] as [Umm, Umm], axes: axesOf(frame), entities };
+		},
+		commit(depthUmm, cut) {
+			const pending = this.sketch();
+			assertDepth(depthUmm);
 			strokes.length = 0;
+			const sketch = { ...pending, id: newId("sketch") };
 			// The step is made by the document module, because the name ("Extrude"/"Cut") and the id rule live
 			// there. The document it lands in is the app's, not this session's.
 			const added = insertExtrude(newDocument(), null, sketch, depthUmm, cut);
@@ -118,6 +146,9 @@ export function startSketch(plane: PlaneRef, host: { origin: Vec3; normal: Vec3 
 			return step;
 		},
 		cancel() {
+			strokes.length = 0;
+		},
+		consume() {
 			strokes.length = 0;
 		},
 	};

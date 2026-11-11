@@ -85,6 +85,11 @@ const RECT: [number, number][] = [
 const edgesOf = (points: [number, number][]): number[] =>
 	points.slice(1).map((p, i) => Math.hypot(p[0]! - points[i]![0]!, p[1]! - points[i]![1]!));
 
+/** The floating dimension field, and only it. Task 10 added a second number input to the tool rail, so a bare
+ *  `input[type=number]` now resolves to two elements and Playwright's strict mode refuses to guess. The field is
+ *  addressed by where it lives, not by its label, so renaming the caption is not a test failure. */
+const FIELD = "cad-dimension-field input[type=number]";
+
 test("a pen rectangle commits as a 40 × 30 mm sketch and one history step", async ({ page }) => {
 	await page.goto("/?kernel=fake");
 	await rendered(page);
@@ -94,11 +99,13 @@ test("a pen rectangle commits as a 40 × 30 mm sketch and one history step", asy
 	expect(drew.seen.filter((s) => s.startsWith("move")).length, "the pen's moves reached the viewer").toBeGreaterThanOrEqual(5);
 	expect(drew.seen.at(-1), "and the stroke was closed by a lift").toBe("end:1");
 
+	// Task 10 moved the depth into the tool rail, so the button path is: draw, type in the rail, press Extrude.
+	// The floating field Task 9 used for this is now the keyboard's door, and the next test proves it: two ways
+	// in, one code path, which is the spec's "the panel must not be the only way in".
+	const depth = page.locator("input[data-tool='depth']");
+	await expect(depth, "a closed ring brings the depth box with it").toBeVisible();
+	await depth.fill("12");
 	await page.getByRole("button", { name: "Extrude" }).click();
-	const field = page.locator("input[type=number]");
-	await expect(field, "Extrude opens the dimension field").toBeVisible();
-	await field.fill("12");
-	await field.press("Enter");
 	const chip = page.locator("[data-sketch-points]");
 	await expect(chip, "one step in the history").toHaveCount(1);
 	await expect(chip).toHaveText(/Extrude 1/);
@@ -123,7 +130,7 @@ test("the same result from the keyboard, with the field focused by E", async ({ 
 	await page.keyboard.press("n");
 	await draw(page, RECT);
 	await page.keyboard.press("e");
-	const field = page.locator("input[type=number]");
+	const field = page.locator(FIELD);
 	await expect(field, "E focuses the dimension field").toBeFocused();
 	// `fill`, not `keyboard.type`. Typed characters do reach this input when nothing else happens first, but a
 	// click-then-type sequence loses them, and the app's own `updated()` hook is the one thing that runs between
@@ -136,7 +143,7 @@ test("the same result from the keyboard, with the field focused by E", async ({ 
 	// The field is gone once the dimension is taken, and a second Extrude with nothing drawn adds nothing.
 	await expect(field).toHaveCount(0);
 	await page.keyboard.press("e");
-	await page.locator("input[type=number]").fill("5");
+	await page.locator(FIELD).fill("5");
 	await page.keyboard.press("Enter");
 	await expect(page.locator("[data-sketch-points]"), "an empty sketch is refused, not duplicated").toHaveCount(1);
 	await expect(page.getByRole("status")).toContainText(/nothing to sketch/i);
@@ -153,7 +160,7 @@ test("S discards what was drawn and Escape abandons a sketch", async ({ page }) 
 	await page.keyboard.press("Escape");
 	expect(await page.evaluate(`(() => (${V}.__CAD_VIEWER__).ink.length)()`), "Escape abandons the pending ring").toBe(0);
 	await page.keyboard.press("e");
-	await page.locator("input[type=number]").fill("12");
+	await page.locator(FIELD).fill("12");
 	await page.keyboard.press("Enter");
 	await expect(page.locator("[data-sketch-points]"), "and nothing of an abandoned sketch builds").toHaveCount(0);
 });

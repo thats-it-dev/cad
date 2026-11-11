@@ -4,7 +4,7 @@
 // sketch's ink, the step chips that stand in for the history panel, and the one floating element the spec
 // allows — the dimension field. The rules live elsewhere: `app/sketch-tool.ts` turns pixels into a document,
 // `app/viewport.ts` draws, and the rebuild is `kernel/rebuild.ts`'s.
-import { LitElement, css, html, nothing } from "https://kit.thatsit.app/lit.js";
+import { LitElement, html, nothing } from "https://kit.thatsit.app/lit.js";
 import { sharedStyles } from "https://kit.thatsit.app/kit.js";
 // The viewer must be imported for its side effect, not for the name: `customElements.define("cad-viewer", …)`
 // lives at the bottom of that file, and a value import the bundler can drop leaves the tag registered by
@@ -16,88 +16,44 @@ import type { CadViewer } from "./app/viewport.ts";
 import "./app/dimension-field.ts";
 import type { CadDimensionField } from "./app/dimension-field.ts";
 import { appendInk, startSketch, type SketchSession } from "./app/sketch-tool.ts";
+// VIEWS is a value, so the module survives bundling. The element's registration is a different matter:
+// customElements.define("cad-tools", …) sits at the bottom of tools-panel.ts, and an import that only takes a
+// type can be dropped by the bundler — the lesson Task 9 learned with cad-viewer. So the element is imported
+// for its side effect on its own line, and e2e/tools.spec.ts asserts the tag is defined.
+import "./app/tools-panel.ts";
+import { VIEWS } from "./app/tools-model.ts";
+import type { Mode } from "./app/tools-model.ts";
+import { removeStep } from "./model/doc.ts";
+import { DocState, commitPending } from "./app/doc-state.ts";
+import { historyStyles, stepChips } from "./app/history-strip.ts";
+import { layoutStyles } from "./app/layout.ts";
+import { isTyping, shortcutFor } from "./app/shortcuts.ts";
 import type { InkPoint } from "./view/gestures.ts";
-import { insertExtrude, newDocument } from "./model/doc.ts";
-import { um } from "./model/units.ts";
-import type { CadDocument, PlaneRef, Step } from "./model/types.ts";
+import { mm, um } from "./model/units.ts";
+import type { CadDocument, PlaneRef } from "./model/types.ts";
+import type { Umm } from "./model/units.ts";
 import { KernelClient } from "./kernel/client.ts";
 import { Rebuilder } from "./kernel/rebuild.ts";
 
 /** v1.0's only sketch plane until the tool panel offers the others (Task 10). */
 const XY: PlaneRef = { kind: "axis", axis: "XY", offset: 0 };
 
-/** A row of the history strip: the step's own name, numbered by its place, and how many corners its sketch
- *  has — the number Task 9's e2e reads to prove a six-point stroke became a four-corner ring. */
-function corners(step: Step): number {
-	if (step.kind !== "extrude") return 0;
-	return step.sketch.entities.reduce((n, e) => {
-		if (e.kind === "circle") return n + 1;
-		const closed = e.points.length > 1 && samePoint(e.points[0], e.points[e.points.length - 1]);
-		return n + e.points.length - (closed ? 1 : 0);
-	}, 0);
-}
-
-const samePoint = (a: [number, number] | undefined, b: [number, number] | undefined): boolean => !!a && !!b && a[0] === b[0] && a[1] === b[1];
-
 export class AppMain extends LitElement {
 	static properties = {
-		doc: { type: Object },
 		status: { state: true },
 		field: { state: true },
+		building: { state: true },
 	};
 
-	static styles = [
-		sharedStyles,
-		css`
-			:host {
-				display: flex;
-				flex-direction: column;
-				position: fixed;
-				inset: 0;
-			}
-			.bar {
-				display: flex;
-				align-items: center;
-				gap: 8px;
-				flex: none;
-				padding: 4px 8px;
-			}
-			.steps {
-				display: flex;
-				gap: 6px;
-				list-style: none;
-				margin: 0;
-				padding: 0;
-				overflow: hidden;
-			}
-			.chip {
-				white-space: nowrap;
-				font-size: 13px;
-				padding: 2px 8px;
-				border: 1px solid currentColor;
-				border-radius: 999px;
-			}
-			.status {
-				margin: 0 0 0 auto;
-				font-size: 13px;
-			}
-			.stage {
-				position: relative;
-				flex: 1;
-				min-height: 0;
-			}
-			cad-viewer {
-				display: block;
-				width: 100%;
-				height: 100%;
-			}
-		`,
-	];
+	static styles = [sharedStyles, historyStyles, layoutStyles];
 
 	/** The document, as the app holds it. e2e reads it straight off the element: under `?kernel=fake` the mesh
 	 *  on screen is the worker's canned box, so the only geometry claim a browser test can make is about what
 	 *  this document stored. */
-	doc: CadDocument = newDocument();
+	/** The model, the pending sketch and the selection, in one place. e2e reads `doc` straight off the element:
+	 *  under ?kernel=fake the mesh on screen is the worker's canned box, so the only geometry claim a browser
+	 *  test can make is about what this document stored. */
+	private state = new DocState();
 
 	private viewer!: CadViewer;
 	private session: SketchSession | null = null;
@@ -106,8 +62,15 @@ export class AppMain extends LitElement {
 	private last: InkPoint | null = null;
 	field: { mm?: number } | null = null;
 	status = "";
+	/** True while a build is in flight: what greys the panel's mutating buttons out. */
+	building = false;
+	private mode: Mode = "sketch";
+	/** The depth the last commit used, in mm, so the field and the panel agree on what is in the box. */
+	private depthMm = 12;
 	private kernel: KernelClient | null = null;
 	private rebuilder: Rebuilder | null = null;
+	/** Builds in flight. The panel's mutating buttons are disabled while it is above zero. */
+	private inflight = 0;
 
 	protected firstUpdated(): void {
 		this.wire();
@@ -128,6 +91,11 @@ export class AppMain extends LitElement {
 		window.__CAD_VIEWER__ = this.viewer;
 		this.viewer.addEventListener("cad-stroke", this.onStroke);
 		addEventListener("keydown", this.onKey);
+		this.state.addEventListener("change", this.onDocChange);
+		// A pending sketch is not an edit: it must repaint the panel without starting a build. Missing this is
+		// how the Extrude and Cut buttons never appeared, even though the ring had closed and the state held it.
+		this.state.addEventListener("pending", this.onPending);
+		this.state.addEventListener("select", this.onPending);
 		if (this.session) this.viewer.frame = this.session.frame;
 	}
 
@@ -135,7 +103,27 @@ export class AppMain extends LitElement {
 		super.disconnectedCallback();
 		this.viewer?.removeEventListener("cad-stroke", this.onStroke);
 		removeEventListener("keydown", this.onKey);
+		this.state.removeEventListener("change", this.onDocChange);
+		this.state.removeEventListener("pending", this.onPending);
+		this.state.removeEventListener("select", this.onPending);
 	}
+
+	private readonly onPending = (): void => {
+		this.requestUpdate();
+	};
+
+	/** The document's own getter, kept for the tests: the model belongs to `state` now. */
+	get doc(): CadDocument {
+		return this.state.doc;
+	}
+
+	/** One door out of the model, and one door into the kernel: panels never start a build themselves, or a
+	 *  failed rebuild leaves the history row and the canvas describing different documents. */
+	private readonly onDocChange = (): void => {
+		this.building = true;
+		this.requestUpdate();
+		void this.rebuild();
+	};
 
 	/** A fresh sketch on the XY plane: the tool's own frame is the viewer's ink frame, or committed entities
 	 *  would be drawn in a plane the pencil was not on. */
@@ -143,6 +131,7 @@ export class AppMain extends LitElement {
 		this.session = startSketch(XY, undefined, this.viewer);
 		this.viewer.frame = this.session.frame;
 		this.viewer.ink = [];
+		this.state.setPending(null);
 		this.buffer = [];
 		this.field = null;
 		this.requestUpdate();
@@ -150,6 +139,12 @@ export class AppMain extends LitElement {
 
 	private readonly onStroke = (event: Event): void => {
 		const detail = (event as CustomEvent<{ phase: string; points: InkPoint[] }>).detail;
+		// Only the pen draws, and only in sketch mode: in select mode a stroke points at something, and Task 12
+		// is what gives it something to point at. The comment said this for a task before the code did.
+		if (this.mode !== "sketch") {
+			if (detail.phase === "end") this.status = "select mode picks a face in Task 12; the pencil draws in sketch mode";
+			return;
+		}
 		if (detail.phase === "start") this.buffer = detail.points;
 		else this.buffer = appendInk(this.buffer, detail.points);
 		if (detail.phase !== "end") return;
@@ -157,25 +152,69 @@ export class AppMain extends LitElement {
 		this.last = this.buffer[this.buffer.length - 1] ?? this.last;
 		this.session?.stroke(this.buffer);
 		this.buffer = [];
-		this.viewer.ink = this.session?.entities() ?? [];
+		// The ink stays as the sketch's entities, and the panel gains its Extrude and Cut buttons from the same
+		// snapshot: one source, so a half-finished drawing cannot show a button that has nothing to build.
+		const pending = this.session?.pending() ?? null;
+		this.state.setPending(pending);
+		this.viewer.ink = pending?.entities ?? [];
 	};
 
 	private readonly onKey = (event: KeyboardEvent): void => {
-		if (event.metaKey || event.ctrlKey || event.altKey) return;
-		// While the field is open the keyboard belongs to it: a typed digit is not a shortcut.
+		// While the field is open the keyboard belongs to it: a typed digit is not a shortcut. This is the one
+		// rule that needs app state; the rest of the key map and the "is someone typing" test are in
+		// src/app/shortcuts.ts, where a Node test can hold them still.
 		if (this.field) {
 			if (event.key === "Escape") this.cancel();
 			return;
 		}
-		const key = event.key.toLowerCase();
-		if (key === "s" || key === "n") this.newSketch();
-		else if (key === "e") this.openDepth();
-		else if (key === "escape") this.cancel();
+		if (isTyping(event)) return;
+		const shortcut = shortcutFor(event);
+		if (!shortcut) return;
+		// Claiming the keystroke means preventing it; see shortcuts.ts for what E used to type into the field it
+		// had just opened.
+		event.preventDefault();
+		if (shortcut === "new") this.newSketch();
+		else if (shortcut === "depth") this.openDepth();
+		else this.cancel();
+	};
+
+	/** Whatever the panel pressed that was not a commit: the two modes, the four views, and fit. */
+	private readonly onTool = (event: Event): void => {
+		const tool = (event as CustomEvent<{ tool: string }>).detail.tool;
+		if (tool === "sketch" || tool === "select") {
+			this.mode = tool;
+			// Only the pen draws, and only in sketch mode: in select mode a stroke is a way of pointing at
+			// something, and Task 12 is what gives it something to point at.
+			if (tool === "sketch") this.newSketch();
+			// `mode` is a plain field, not @state, so nothing here would repaint and the pressed ring on the button
+			// would stay on whichever mode the page loaded in. Lit cannot see a plain assignment.
+			this.requestUpdate();
+			return;
+		}
+		if (tool === "fit") {
+			// A part that has never been built has no bounds, and fitting a 0-box parks the eye 4 mm from the
+			// origin: the canvas reads as empty, which is the failure the spec calls out by name. Say so instead.
+			if (!this.viewer.fit()) this.status = "nothing to fit yet";
+			this.requestUpdate();
+			return;
+		}
+		if (tool in VIEWS) this.viewer.setView(VIEWS[tool as keyof typeof VIEWS]);
+	};
+
+	private readonly onCancel = (event: Event): void => {
+		const tool = (event as CustomEvent<{ tool: string }>).detail.tool;
+		if (tool === "delete") {
+			const picked = this.state.selection;
+			if (picked) this.state.apply((doc) => removeStep(doc, picked.id));
+			return;
+		}
+		this.cancel();
 	};
 
 	private cancel(): void {
 		this.session?.cancel();
 		this.viewer.ink = [];
+		this.state.setPending(null);
 		this.buffer = [];
 		this.field = null;
 		this.requestUpdate();
@@ -208,24 +247,55 @@ export class AppMain extends LitElement {
 			this.requestUpdate();
 			return;
 		}
-		const session = this.session;
-		if (!session) return;
+		this.depthMm = mm;
+		this.commit(false);
+	};
+
+	/** The panel's Extrude and Cut. Same path as the field and the keyboard, which is the point: a press and a
+	 *  keystroke must not be able to disagree about what a commit costs. */
+	private readonly panelCommit = (event: Event): void => {
+		const detail = (event as CustomEvent<{ depth: number; cut: boolean }>).detail;
+		this.commit(detail.cut, detail.depth);
+	};
+
+	/** A commit, with the rules that are not the document's business: what the sketch was, and what to say. */
+	private commit(cut: boolean, depthUmm?: Umm): void {
 		this.field = null;
-		let step: Step;
+		if (!this.session) return;
+		// One depth, remembered. Without this the rail's box and the E field disagree: the panel converts what it
+		// typed and app-main never stores it, so a 25 mm press followed by E+Enter builds a 12 mm part while the
+		// box still reads 25 — the invariant this file states two lines above the handler, broken in practice.
+		if (depthUmm !== undefined) {
+			if (!Number.isFinite(depthUmm) || depthUmm <= 0) {
+				// The rail's box holds what the browser accepted, and a number input with a raw value of "e" reads
+				// back as "". Converting that gave um(NaN) = 0, so the press answered with "the depth must be a whole
+				// positive number of micrometres" — true, and about a number nobody typed. The box stays open.
+				this.status = "type a depth in millimetres, above zero";
+				this.requestUpdate();
+				return;
+			}
+			this.depthMm = mm(depthUmm);
+		}
 		try {
-			step = session.commit(um(mm), false);
+			this.state.setPending(this.session.sketch());
+			if (!commitPending(this.state, { depth: depthUmm ?? um(this.depthMm), cut })) {
+				this.status = "nothing to sketch";
+				return;
+			}
+			// The ring has become a step, so the pencil forgets it. Order matters: the panel's pending sketch is
+			// cleared by commitPending, and if the session still held the stroke a second press could rebuild it.
+			this.session.consume();
+			this.state.setPending(this.session.pending());
+			this.viewer.ink = this.state.pending?.entities ?? [];
+			this.status = `${cut ? "Cut" : "Extrude"} ${this.state.doc.steps.length} added`;
 		} catch (e) {
 			// A refused sketch stays drawn as ink, and the reason is said out loud: the spec's one anti-goal
 			// that a tool can fall into by omission is a failure that reads as nothing happening.
 			this.status = e instanceof Error ? e.message : String(e);
-			this.viewer.ink = session.entities();
-			return;
+			this.viewer.ink = this.session.entities();
+			this.requestUpdate();
 		}
-		this.viewer.ink = session.entities();
-		this.doc = insertExtrude(this.doc, null, step.sketch, step.depth, step.cut).doc;
-		this.status = `${step.name} ${this.doc.steps.length} added`;
-		void this.rebuild();
-	};
+	}
 
 	/** One kernel, started on the first build rather than on load: the page must not pull 21 MB to say hello. */
 	private async rebuild(): Promise<void> {
@@ -239,32 +309,53 @@ export class AppMain extends LitElement {
 			});
 			this.rebuilder = new Rebuilder(this.kernel);
 		}
+		this.inflight += 1;
+		this.building = true;
 		try {
 			const result = await this.rebuilder?.request(this.doc);
 			if (result) this.viewer.mesh = result.mesh;
 			if (result && !result.ok) this.status = result.error;
 		} catch (e) {
 			this.status = e instanceof Error ? e.message : String(e);
+		} finally {
+			// A counter, not a boolean: two edits in the same frame start two requests, and the first one
+			// finishing must not unlock the panel while the second is still in the kernel. Without this the
+			// panel greyed itself out for good after the first build, which is how "Cut" sat disabled.
+			this.inflight -= 1;
+			this.building = this.inflight > 0;
 		}
 		this.requestUpdate();
 	}
 
 	render() {
 		return html`
-			<div class="bar">
-				<button class="btn" @click=${this.newSketch}>Sketch</button>
-				<button class="btn" @click=${this.openDepth}>Extrude</button>
-				<ol class="steps">
-					${this.doc.steps.map((step, i) => html`<li class="chip" data-sketch-points=${corners(step)}>${step.kind === "extrude" ? step.name : step.type} ${i + 1}</li>`)}
-				</ol>
-				<p class="status" role="status">${this.status}</p>
+			<nav class="rail">
+				<cad-tools
+					.mode=${this.mode}
+					.pending=${this.state.pending}
+					.selection=${this.state.selection}
+					.steps=${this.state.doc.steps.length}
+					.busy=${this.building}
+					.depthMm=${this.depthMm}
+					@cad-commit-extrude=${this.panelCommit}
+					@cad-tool=${this.onTool}
+					@cad-cancel=${this.onCancel}
+				></cad-tools>
+			</nav>
+			<div class="column">
+				<div class="bar">
+					<ol class="steps">
+						${stepChips(this.state.doc.steps)}
+					</ol>
+					<p class="status" role="status">${this.status}</p>
+				</div>
+				<div class="stage"><cad-viewer></cad-viewer></div>
 			</div>
-			<div class="stage"><cad-viewer></cad-viewer></div>
 			${this.field === null
 				? nothing
 				: html`<cad-dimension-field
 						open
-						.mm=${this.field.mm}
+						.mm=${this.field.mm ?? this.depthMm}
 						style=${`left:${this.last?.x ?? 0}px; top:${this.last?.y ?? 0}px`}
 						@cad-dimension=${this.fieldAt}
 					></cad-dimension-field>`}

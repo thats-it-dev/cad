@@ -1,0 +1,35 @@
+{
+	"name": "app-template",
+	"private": true,
+	"version": "0.0.0",
+	"type": "module",
+	"engines": {
+		"node": ">=22.18"
+	},
+	"scripts": {
+		"kit-types": "node scripts/kit-types.ts",
+		"predev": "npm run kit-types",
+		"dev": "vite",
+		"prebuild": "npm run kit-types",
+		"build": "tsc && vite build",
+		"preview": "vite preview",
+		"pretypecheck": "npm run kit-types",
+		"typecheck": "tsc",
+		"test": "vitest run",
+		"e2e": "playwright test",
+		"icons": "node scripts/make-icons.ts",
+		"e2e:one": "playwright test --project=desktop",
+		"lint": "knip --no-progress",
+		"guardrails": "vitest run test/guardrails.test.ts && npm run lint",
+		"verify": "npm run typecheck && npm test && npm run lint && npm run e2e"
+	},
+	"devDependencies": {
+		"@playwright/test": "1.64.0",
+		"@types/node": "24.19.2",
+		"knip": "5.88.1",
+		"lit": "3.3.3",
+		"typescript": "5.9.3",
+		"vite": "8.3.4",
+		"vitest": "5.0.3"
+	}
+}

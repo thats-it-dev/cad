@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en" data-shell>
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+		<meta name="theme-color" content="#f1f1f1" media="(prefers-color-scheme: light)" />
+		<meta name="theme-color" content="#171717" media="(prefers-color-scheme: dark)" />
+		<meta name="mobile-web-app-capable" content="yes" />
+		<meta name="apple-mobile-web-app-capable" content="yes" />
+		<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+		<meta name="apple-mobile-web-app-title" content="%APP_TITLE%" />
+		<meta name="description" content="%APP_DESCRIPTION%" />
+		<link rel="manifest" href="/manifest.webmanifest" />
+		<link rel="icon" href="/icons/icon-192.png" type="image/png" sizes="192x192" />
+		<link rel="icon" href="/icons/icon.svg" type="image/svg+xml" />
+		<!-- Inlined by vite/app-plugin.ts: iOS 27 can't load the Home Screen icon from a URL. -->
+		<link rel="apple-touch-icon" sizes="180x180" href="__APPLE_TOUCH_ICON__" />
+		<title>%APP_TITLE%</title>
+		<link rel="stylesheet" href="https://kit.thatsit.app/kit.css" />
+		<script src="https://kit.thatsit.app/theme-init.js" data-key="app:theme"></script>
+	</head>
+	<body>
+		<app-main></app-main>
+		<script type="module" src="/src/main.ts"></script>
+	</body>
+</html>

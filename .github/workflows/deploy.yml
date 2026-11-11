@@ -1,0 +1,109 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+# Cancel superseded PR runs only; a half-uploaded production deploy must finish.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # Playwright's image already has the browsers and their system packages, so there is no install step (it took
+    # 16-212 s on a plain runner). Its tag must equal the @playwright/test version; npm test checks that.
+    container: mcr.microsoft.com/playwright:v1.64.0-noble
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run lint
+      - run: npm run e2e
+        env:
+          HOME: /root
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    # Empty on fork PRs: tests still run, the deploy and comment are skipped.
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      # A fresh copy of the template still says app-template; deploying then would overwrite the template's demo.
+      - name: Check the app was renamed
+        id: guard
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          NAME=$(node -p "require('./app.config.json').name")
+          if [ "$NAME" = "app-template" ] && [ "$REPO" != "thats-it-dev/app-template" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Deploy skipped: app.config.json still has name app-template. Edit it first." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Deploy to Cloudflare Pages
+        id: deploy
+        if: env.CLOUDFLARE_API_TOKEN != '' && steps.guard.outputs.skip != 'true'
+        env:
+          EVENT: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
+          REF_NAME: ${{ github.ref_name }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          # A `Gateway: thats-it-dev/spark-gateway#N` line in the PR body points the preview at that gateway preview.
+          if [ "$EVENT" = "pull_request" ]; then
+            GATEWAY_URL=$(node scripts/gateway-url.ts <<< "$PR_BODY")
+            if [ -n "$GATEWAY_URL" ]; then
+              echo "GATEWAY_URL=$GATEWAY_URL" >> "$GITHUB_ENV"
+              export GATEWAY_URL
+            fi
+          fi
+          NAME=$(node -p "require('./app.config.json').name")
+          # Production only from main; any other branch (including a manual run) is a preview.
+          if [ "$EVENT" = "pull_request" ]; then BRANCH="$HEAD_REF"; else BRANCH="$REF_NAME"; fi
+          npm run build
+          npx wrangler@4.149.0 pages deploy dist --project-name "$NAME" --branch "$BRANCH" | tee deploy.log
+          URL=$(node scripts/preview-url.ts < deploy.log)
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Deployed: $URL" >> "$GITHUB_STEP_SUMMARY"
+      - name: Comment preview link
+        if: env.CLOUDFLARE_API_TOKEN != '' && steps.guard.outputs.skip != 'true' && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          URL: ${{ steps.deploy.outputs.url }}
+          GATEWAY_URL: ${{ env.GATEWAY_URL }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          BODY=$(printf '<!-- thatsit-preview -->\nPreview: %s\n\nCommit %s' "$URL" "${SHA:0:7}")
+          if [ -n "${GATEWAY_URL:-}" ]; then BODY=$(printf '%s\n\nGateway preview: %s' "$BODY" "$GATEWAY_URL"); fi
+          ID=$(gh api "repos/$REPO/issues/$PR/comments?per_page=100" --paginate --jq \
+            '.[] | select(.user.login == "github-actions[bot]" and (.body | contains("<!-- thatsit-preview -->"))) | .id' | jq -rs '.[0] // empty')
+          if [ -n "$ID" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$ID" -f body="$BODY" > /dev/null
+          else
+            gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$BODY" > /dev/null
+          fi

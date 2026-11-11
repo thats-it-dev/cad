@@ -1,0 +1,21 @@
+{
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "ESNext",
+		"moduleResolution": "bundler",
+		"lib": ["ES2022", "DOM", "DOM.Iterable"],
+		"types": ["node"],
+		"strict": true,
+		"noEmit": true,
+		"skipLibCheck": false,
+		"allowImportingTsExtensions": true,
+		"useDefineForClassFields": false,
+		"experimentalDecorators": true,
+		"baseUrl": ".",
+		"paths": {
+			"https://kit.thatsit.app/kit.js": ["./.kit/kit.d.ts"],
+			"https://kit.thatsit.app/lit.js": ["./.kit/types/lit.d.ts"]
+		}
+	},
+	"include": ["src", "vite", "scripts", "test", "*.ts"]
+}

@@ -31,7 +31,7 @@ Measured 2026-11-11 on the spark — Linux aarch64 (DGX Spark, 20 cores), Chromi
 `--project=desktop` run of `e2e/kernel.spec.ts`, served by `vite preview` on localhost. Every number in the table
 is from that single run, and each is a line the harness printed (every row with more than one number carries the
 harness's own `samples-…` and `median-…` lines rather than numbers pasted in by hand). The wasm is 21241345 bytes
-(20.25 MiB) and `kernel load` does not include pulling it: the page fetches it once per visit and 138 ms is
+(20.25 MiB) and `kernel load` does not include pulling it: the page fetches it once per visit and 135 ms is
 instantiate-plus-startup. That is the number to read carefully before believing the iPad one, because the fetch
 is not free anywhere:
 - `public/kernel/` is copied verbatim to `dist/kernel/`, so the wasm keeps a stable URL and is not content-hashed.
@@ -43,15 +43,15 @@ is not free anywhere:
   deploy headers.
 
 So on the iPad the first visit pays a full 20 MiB fetch over Tailscale and every later visit pays at least a
-revalidation round trip — neither is compute, and neither is included in 138 ms.
+revalidation round trip — neither is compute, and neither is included in 135 ms.
 
 | what | `maxDeviation` 0.1 mm | `maxDeviation` 0.02 mm |
 | --- | --- | --- |
-| kernel load: worker + wasm, after the fetch | 138 ms | — |
-| rebuild, 1 step (the box) | 44 ms | — |
-| **rebuild, 20 steps (the bench)** | **817 ms** median (953, 827, 817, 809, 808) | 802 ms median (975, 814, 802, 796, 794) |
-| preview: `meshHistoryStep` on the last step | 77 ms median (79, 77, 77, 78, 77) | not run |
-| export: `saveShapeSTEP` | 88 ms | 87 ms |
+| kernel load: worker + wasm, after the fetch | 135 ms | — |
+| rebuild, 1 step (the box) | 42 ms | — |
+| **rebuild, 20 steps (the bench)** | **812 ms** median (948, 823, 812, 805, 806) | 802 ms median (966, 816, 802, 798, 795) |
+| preview: `meshHistoryStep` on the last step | 78 ms median (79, 78, 79, 78, 78) | not run |
+| export: `saveShapeSTEP` | 89 ms | 85 ms |
 | volume probe | box 14400, bench 11664 mm³ | same |
 
 Nothing behind these rebuilds is memoised, and that is measured rather than asserted: the shipped worker zeroes
@@ -73,17 +73,17 @@ not exponential.
 
 ## The decision
 
-- **`maxDeviation`: 0.1 mm**, the kernel's own default, stays. 0.02 mm changed nothing — 802 vs 817 ms on this
+- **`maxDeviation`: 0.1 mm**, the kernel's own default, stays. 0.02 mm changed nothing — 802 vs 812 ms on this
   part — because every face in it is planar, so a finer tessellation costs nothing and buys nothing visible.
   Curved sketches (Task 12's fillets, circles at speed) are where the two will separate; that is a v1.2 question,
   not a v1.0 one. The app may still ask for 0.02 while the user drags, but not because it is faster.
 - **Does v1.0 need the optimistic preview: NOT DECIDED — pending the iPad row below.** The spec draws the line at
-  ~2 s on an iPad, and 817 ms is a spark-desktop-Chromium number. For the iPad to cross the line it only has to
+  ~2 s on an iPad, and 812 ms is a spark-desktop-Chromium number. For the iPad to cross the line it only has to
   be 2.5× slower than this machine, which an iPad doing the same OCCT work in Safari's wasm JIT plausibly is.
   Task 9 should not wire the preview on this number alone, and should not skip it either.
-- What is *not* in doubt: the preview is cheap insurance. `meshHistoryStep` came back in 77 ms — 10× under a
+- What is *not* in doubt: the preview is cheap insurance. `meshHistoryStep` came back in 78 ms — 10× under a
   rebuild — and returned a solid, so the fallback path works and costs one extra call. If the iPad rebuild lands
-  over 2 s, wiring it in Task 9 is a ~77 ms win per edit.
+  over 2 s, wiring it in Task 9 is a ~78 ms win per edit.
 
 ## iPad (pending — Task 15 with Michael)
 

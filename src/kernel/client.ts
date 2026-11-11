@@ -41,7 +41,10 @@ const MAX_DEVIATION = 0.1;
  *  build's shape. `self.GUIState["Cache?"]` gates both the lookup and the store, so it goes off every build. */
 const GUI_STATE = { "Cache?": false };
 
-/** What `combineAndRenderShapes` replies with: the raw `[ [faces, edges], sceneOptions ]` pair. */
+/** What `combineAndRenderShapes` replies with: the raw `[ [faces, edges], sceneOptions ]` pair. The vendored
+ *  engine destructures it exactly this way (`const [[faces, edges], opts] = result`, vendor/CascadeEngine.js),
+ *  and the real kernel confirmed it: reading faces one level deeper made `decodeMesh` call `.reduce` on a
+ *  number and every build came back failed with a message about the mesh, not the worker. */
 type CombineReply = [[RawFace[], RawEdge[]], Record<string, unknown>] | null | undefined;
 
 /** A shape the kernel skipped, which is expected while a face-anchored step exists (Task 12). Not a failure. */

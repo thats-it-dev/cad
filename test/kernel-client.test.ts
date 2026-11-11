@@ -73,6 +73,9 @@ const face = (faceIndex: number, x: number) => ({
 	face_index: faceIndex,
 });
 
+// The worker's router wraps a handler's return value, and combineAndRenderShapes returns a pair, so the real
+// payload is [[[faces, edges], sceneOptions]]. meshHistoryStep returns the pair alone. Getting these wrong once
+// made every build decode the pair as if it were a face list, which the lenient kernel e2e did not notice.
 const combineReply = (faces: unknown[]) => [[faces, []], { groundPlaneVisible: undefined, gridVisible: undefined }];
 
 /** The answering kernel: runs the script's probe calls, then meshes whatever it has. */

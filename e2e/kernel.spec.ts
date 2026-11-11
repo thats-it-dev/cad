@@ -40,7 +40,10 @@ test("the real kernel builds a solid and measures the box it built", async ({ pa
 
 	// The single box: a solid comes back, and the kernel's own `Volume` agrees with arithmetic to 0.1%.
 	expect(r.box.ok, r.box.error ?? "the box build reported no failure").toBe(true);
-	expect(r.box.faceCount).toBeGreaterThan(0);
+	// Six, not merely > 0: a box has six faces, and this is the assertion that pins the reply's nesting. The
+	// client once read faces from the wrong depth of combineAndRenderShapes' payload and decodeMesh made a
+	// one-face mesh of it, which a "solid came back" check could never see.
+	expect(r.box.faceCount, "one extruded box is six faces").toBe(6);
 	const volume = r.box.volume ?? 0;
 	expect(Math.abs(volume - BOX) / BOX, `volume probe read ${volume}`).toBeLessThan(0.001);
 

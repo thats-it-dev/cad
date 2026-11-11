@@ -110,11 +110,25 @@ export class AppMain extends LitElement {
 	private rebuilder: Rebuilder | null = null;
 
 	protected firstUpdated(): void {
+		this.wire();
+		this.newSketch();
+	}
+
+	connectedCallback(): void {
+		super.connectedCallback();
+		// `disconnectedCallback` took the window's keydown listener and the viewer's cad-stroke listener away,
+		// and Lit will not run `firstUpdated` again after a re-connect: a moved app-main came back deaf to the
+		// keyboard. Only the listeners are re-armed — the session is left alone, so an in-progress sketch is
+		// not silently thrown away by a re-parent. `hasUpdated` keeps the first connect as firstUpdated's.
+		if (this.hasUpdated) this.wire();
+	}
+
+	private wire(): void {
 		this.viewer = this.renderRoot.querySelector("cad-viewer") as CadViewer;
 		window.__CAD_VIEWER__ = this.viewer;
 		this.viewer.addEventListener("cad-stroke", this.onStroke);
 		addEventListener("keydown", this.onKey);
-		this.newSketch();
+		if (this.session) this.viewer.frame = this.session.frame;
 	}
 
 	disconnectedCallback(): void {
@@ -187,13 +201,16 @@ export class AppMain extends LitElement {
 
 	private readonly fieldAt = (event: Event): void => {
 		const mm = (event as CustomEvent<{ mm: number }>).detail.mm;
-		this.field = null;
 		if (!Number.isFinite(mm) || mm <= 0) {
+			// The field stays open, because the number in it is the thing that was wrong and the user is one
+			// edit away from fixing it. Closing it here made a mistyped depth cost a second press of E.
 			this.status = "type a depth in millimetres, above zero";
+			this.requestUpdate();
 			return;
 		}
 		const session = this.session;
 		if (!session) return;
+		this.field = null;
 		let step: Step;
 		try {
 			step = session.commit(um(mm), false);

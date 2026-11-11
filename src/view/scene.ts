@@ -170,8 +170,8 @@ export function createScene(canvas: HTMLCanvasElement, overlay?: Overlay): Scene
 	const ray = new THREE.Raycaster();
 	const ndc = new THREE.Vector2();
 	const centre = new THREE.Vector3();
-	const toward = new THREE.Vector3();
 	const sideways = new THREE.Vector3();
+	const scratch = new THREE.Vector3();
 	let width = 1;
 	let height = 1;
 	let shown: Mesh | null = null;
@@ -189,12 +189,17 @@ export function createScene(canvas: HTMLCanvasElement, overlay?: Overlay): Scene
 		},
 		pan(dx, dy) {
 			const mmPerPx = visibleHeight() / height;
-			move(dx * mmPerPx, dy * mmPerPx);
+			// The target moves opposite the fingers, because moving a camera moves its content the other way.
+			move(-dx * mmPerPx, dy * mmPerPx);
 		},
 		zoom(factor, centre) {
 			const mmPerPx = visibleHeight() / height;
-			// Keep the point under the fingers or the cursor where it was, then dolly.
-			move((centre.x - width / 2) * mmPerPx * (1 - 1 / factor), (centre.y - height / 2) * mmPerPx * (1 - 1 / factor));
+			// Keep the point under the fingers or the cursor where it was, then dolly. The offset is measured
+			// from the canvas's own centre in its own px: `centre` arrives as client px, and once a toolbar
+			// moved the canvas off y = 0 that difference was 39 px of bogus anchor.
+			const ox = centre.x - rect().left - width / 2;
+			const oy = centre.y - rect().top - height / 2;
+			move(ox * mmPerPx * (1 - 1 / factor), -oy * mmPerPx * (1 - 1 / factor));
 			view.distance = Math.min(Math.max(view.distance / factor, NEAR_LIMIT), FAR_LIMIT);
 		},
 		snap() {
@@ -209,20 +214,18 @@ export function createScene(canvas: HTMLCanvasElement, overlay?: Overlay): Scene
 		return 2 * view.distance * Math.tan(((FOV / 2) * Math.PI) / 180);
 	}
 
-	/** Shifts the target along the screen's own axes, in mm. `right` is screen-right, `up` screen-up. */
+	/** Shifts the target along the screen's own axes, in mm. `right` is screen-right, `up` screen-up. Both axes
+	 *  come from the camera's basis rather than from hand-derived algebra: the hand-derived "screen-up" this
+	 *  file used to build was the horizontal projection of the view direction — right sign, wrong by cos φ —
+	 *  which made a vertical two-finger drag move the model against the fingers at 58% of their distance. */
 	function move(right: number, up: number): void {
-		// toward = target → eye. Screen-right is up × (target→eye) crossed the other way round: with camera.up
-		// = +Z and azimuth θ the eye sits at (sin θ cos φ, …, cos θ cos φ) from the target, so the horizontal
-		// unit the pan has to follow is (-sin θ, cos θ, 0) = (target→eye) × up … and screen-up is the negative
-		// of up × that, because up × right points *down* the screen for a Z-up camera. Both signs were got
-		// wrong once, which made a two-finger drag push the model against the fingers.
-		toward.copy(direction(view)).negate();
-		sideways.crossVectors(camera.up, toward).normalize().negate();
-		toward.crossVectors(sideways, camera.up).normalize();
+		const eye = scratch.copy(direction(view)); // target → eye, which is the camera's own +Z
+		sideways.crossVectors(camera.up, eye).normalize(); // screen-right: (-sin θ, cos θ, 0), never φ-dependent
+		scratch.crossVectors(eye, sideways).normalize(); // screen-up = z_cam × x̂
 		view.target = [
-			view.target[0] + sideways.x * right + toward.x * up,
-			view.target[1] + sideways.y * right + toward.y * up,
-			view.target[2] + sideways.z * right + toward.z * up,
+			view.target[0] + sideways.x * right + scratch.x * up,
+			view.target[1] + sideways.y * right + scratch.y * up,
+			view.target[2] + sideways.z * right + scratch.z * up,
 		];
 	}
 
@@ -253,10 +256,16 @@ export function createScene(canvas: HTMLCanvasElement, overlay?: Overlay): Scene
 		shown = mesh;
 	}
 
+	/** The canvas's own box, in client px. `device()` and the zoom anchor both need it: a `<cad-viewer>` does
+	 *  not start at (0, 0) once a toolbar shares the page, and pointer events arrive in client px. */
+	function rect(): DOMRect {
+		return canvas.getBoundingClientRect();
+	}
+
 	/** Screen px to normalised device coords, off the canvas's own box (it sits in a shadow root). */
 	function device(clientX: number, clientY: number): THREE.Vector2 {
-		const rect = canvas.getBoundingClientRect();
-		return ndc.set(((clientX - rect.left) / Math.max(1, rect.width)) * 2 - 1, -(((clientY - rect.top) / Math.max(1, rect.height)) * 2 - 1));
+		const box = rect();
+		return ndc.set(((clientX - box.left) / Math.max(1, box.width)) * 2 - 1, -(((clientY - box.top) / Math.max(1, box.height)) * 2 - 1));
 	}
 
 	/** A ray from the camera through a screen point. */

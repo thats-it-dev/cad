@@ -209,31 +209,44 @@ test("a mouse drag orbits, and release snaps only when the camera is near an axi
 test("two fingers pan the model with them, not against them", async ({ page }) => {
 	await page.goto("/?kernel=fake");
 	await rendered(page);
-	const before = (await page.evaluate(CAMERA)) as { target: [number, number, number] };
-	// A real two-finger drag needs two live pointers; Playwright's touch emulator drives one, so the pair is
-	// dispatched. The geometry is the part under test: screen-right is a vector the scene computes, and the
-	// scene cannot be unit tested in Node, where there is no WebGL and no canvas.
-	await page.evaluate(`(() => {
-		const c = ${CANVAS("model")};
+	// What is measured is where a fixed point on the sketch plane appears on screen, before and after the
+	// drag. The earlier version of this test read `view.target` and called that "the model rides with the
+	// fingers", which is backwards: translating a camera moves its content the opposite way, so the assertion
+	// passed while the model slid against the drag. The scene cannot be unit tested in Node (no WebGL, no
+	// canvas), so the browser has to measure the real thing.
+	const moved = (await page.evaluate(`(() => {
+		const v = ${V}.__CAD_VIEWER__, s = v["scene"];
+		const F = { origin: [0, 0, 0], u: [1, 0, 0], v: [0, 1, 0], normal: [0, 0, 1] };
+		const c = v.renderRoot.querySelector("canvas.model");
+		const b = c.getBoundingClientRect();
+		const C = [b.left + b.width / 2, b.top + b.height / 2];
+		const at = (x, y) => { s.render(v.mesh, []); return s.screenToPlane(x, y, F); };
+		// Invert the camera's local map once: the pixel at which a plane point now appears.
+		const appearsAt = (a) => {
+			const q = at(C[0], C[1]);
+			const e = 4, ax = at(C[0] + e, C[1]), ay = at(C[0], C[1] + e);
+			const m00 = (ax[0] - q[0]) / e, m01 = (ay[0] - q[0]) / e, m10 = (ax[1] - q[1]) / e, m11 = (ay[1] - q[1]) / e;
+			const det = m00 * m11 - m01 * m10;
+			return [(m11 * (a[0] - q[0]) - m01 * (a[1] - q[1])) / det, (m00 * (a[1] - q[1]) - m10 * (a[0] - q[0])) / det];
+		};
+		const home = at(C[0], C[1]);
 		const fire = (type, id, x, y) => c.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId: id, pointerType: "touch", isPrimary: id === 1, clientX: x, clientY: y }));
 		fire("pointerdown", 1, 200, 300);
 		fire("pointerdown", 2, 200, 500);
-		fire("pointermove", 1, 300, 300);
-		fire("pointermove", 2, 300, 500);
-		fire("pointerup", 1, 300, 300);
-		fire("pointerup", 2, 300, 500);
-		return true;
-	})()`);
-	const after = (await page.evaluate(CAMERA)) as { target: [number, number, number]; theta: number };
-	const dx = after.target[0] - before.target[0];
-	const dy = after.target[1] - before.target[1];
-	expect(Math.hypot(dx, dy), "a 100 px two-finger drag moves the target off centre").toBeGreaterThan(1);
-	// Which way "with the fingers" is, computed rather than pasted: screen-right in world space is the
-	// horizontal unit perpendicular to the view azimuth, (-sin θ, cos θ, 0), for any φ. A drag to the right
-	// must move the camera's target along it — the model appears to ride with the fingers.
-	const right = [-Math.sin(after.theta), Math.cos(after.theta)];
-	const along = dx * right[0]! + dy * right[1]!;
-	expect(along, "the target moves screen-right when the fingers drag screen-right").toBeGreaterThan(1);
+		fire("pointermove", 1, 300, 400);
+		fire("pointermove", 2, 300, 600);
+		fire("pointerup", 1, 300, 400);
+		fire("pointerup", 2, 300, 600);
+		const now = appearsAt(home);
+		return { dx: Math.round(now[0]), dy: Math.round(now[1]) };
+	})()`)) as { dx: number; dy: number };
+	expect(moved.dx, "a diagonal drag carries the model right with the fingers").toBeGreaterThan(50);
+	// Both components land near 90 rather than 100 for a two-finger drag on this plane: `mmPerPx` is the scale
+	// at the target plane and the XY plane meets a tilted view obliquely, so px of finger buys slightly less
+	// px of content. What was broken, and what would fail here in a heartbeat, is the sign: before this fix
+	// the same drag measured dx = -100 (against the fingers) and dy = -58 (against, at 58% = cos φ, because
+	// the "screen-up" vector was actually the horizontal projection of the view direction).
+	expect(moved.dy, "and down with the fingers, not up").toBeGreaterThan(50);
 });
 
 test("a pen lift does not move the camera", async ({ page }) => {
@@ -259,15 +272,33 @@ test("a pen lift does not move the camera", async ({ page }) => {
 test("a wheel zoom keeps the point under the cursor where it was", async ({ page }) => {
 	await page.goto("/?kernel=fake");
 	await rendered(page);
-	// The anchor is the test: dolly in about (500, 300) and the mm of the model under (500, 300) must not
-	// change. Sign errors in the pan axes passed unnoticed for exactly this long because nothing measured it.
+	// The anchor is the test: dolly in about a point 200 px right and 150 px down from the canvas centre —
+	// deliberately off both axes, because a version of this measured only the in-plane X term and a pure-Z
+	// error read as no drift at all.
 	const drift = (await page.evaluate(`(() => {
-		const s = ${V}.__CAD_VIEWER__["scene"];
-		const plane = { normal: [0, 0, 1], origin: [0, 0, 0], u: [1, 0, 0], v: [0, 1, 0] };
-		const before = s.screenToPlane(500, 300, plane);
-		s.view.zoom(1.4, { x: 500, y: 300 });
-		const after = s.screenToPlane(500, 300, plane);
+		const v = ${V}.__CAD_VIEWER__, s = v["scene"];
+		const F = { origin: [0, 0, 0], u: [1, 0, 0], v: [0, 1, 0], normal: [0, 0, 1] };
+		const b = v.renderRoot.querySelector("canvas.model").getBoundingClientRect();
+		const at = (x, y) => { s.render(v.mesh, []); return s.screenToPlane(x, y, F); };
+		const off = [b.left + b.width / 2 + 200, b.top + b.height / 2 + 150];
+		const before = at(off[0], off[1]);
+		s.view.zoom(1.4, { x: off[0], y: off[1] });
+		const after = at(off[0], off[1]);
 		return Math.hypot(before[0] - after[0], before[1] - after[1]);
 	})()`)) as number;
-	expect(drift, "zooming 1.4× about a point slides it by less than a tenth of a mm").toBeLessThan(0.1);
+	expect(drift, "zooming 1.4× about an off-centre point slides it by less than a tenth of a mm").toBeLessThan(0.1);
+});
+
+test("zooming after a build does not re-frame the part", async ({ page }) => {
+	await page.goto("/?kernel=fake");
+	await rendered(page);
+	await showMesh(page, await stubMesh(page));
+	// auto-fit runs the first time real geometry lands; after that the camera belongs to the user. The bug
+	// this pins: draw() used to treat "the camera moved" as "frame the part again", so once a build was on
+	// screen every wheel notch and every two-finger drag snapped back to the full-part view.
+	const before = (await page.evaluate(`(() => { const s = ${V}.__CAD_VIEWER__["scene"]; s.render(${V}.__CAD_VIEWER__.mesh, []); return { d: s.view.distance }; })()`)) as { d: number };
+	await page.evaluate(`(() => { ${V}.__CAD_VIEWER__["scene"].view.zoom(2, { x: 400, y: 400 }); return true; })()`);
+	await page.evaluate(`(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)))))()`);
+	const after = (await page.evaluate(`(() => ({ d: ${V}.__CAD_VIEWER__["scene"].view.distance }))()`)) as { d: number };
+	expect(after.d, "the zoom is still in effect after the frames that followed it").toBeCloseTo(before.d / 2, 6);
 });

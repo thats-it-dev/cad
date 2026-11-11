@@ -49,8 +49,11 @@ const ALREADY_PLANE_MM: Map2 = { originPx: [0, 0], mmPerPx: 1 };
 const SNAP_UM: Umm = 1;
 
 /** A ring's end may sit this many screen px from its start and still count as meeting it: what a pencil
- *  overshoot looks like on the glass, and deliberately zoom-independent, because the user sees pixels. */
+ *  overshoot looks like on the glass. Pixels are the right unit only while the part fills the screen, so
+ *  `CLOSURE_EXTENT` caps it against the ring's own size — otherwise, zoomed out, a 60% C whose tip gap is
+ *  ten pixels of screen closes into a polygon with a diagonal the pencil never drew (review P2). */
 const CLOSURE_PX = 16;
+const CLOSURE_EXTENT = 0.25;
 
 /** … or this large a share of the stroke's own arc length, whichever is the bigger allowance: a ring traced
  *  90% of the way round is a ring the user meant to close. Past that (a C, a hook) it is not a shape, and
@@ -103,6 +106,7 @@ export function startSketch(plane: PlaneRef, host: { origin: Vec3; normal: Vec3 
 			const entities = entitiesOf(strokes);
 			if (entities.length === 0) throw new Error("nothing to sketch");
 			if (strokes.some((s) => !s.closed)) throw new Error("the ring did not close: come back to the start");
+			if (entities.some((e) => e.kind === "poly" && crossesItself(e.points))) throw new Error("the ring crosses itself: lift the pen and start again");
 			if (!Number.isInteger(depthUmm) || depthUmm <= 0) throw new Error("the depth must be a whole positive number of micrometres");
 			const sketch = { id: newId("sketch"), plane, origin: [0, 0] as [Umm, Umm], axes: axesOf(frame), entities };
 			strokes.length = 0;
@@ -135,8 +139,51 @@ const same = (a: InkPoint | undefined, b: InkPoint | undefined): boolean => !!a 
 /** The gap a ring may leave between its last point and its first: pixels, or a share of its own arc. */
 function gapPx(px: [number, number][]): number {
 	let arc = 0;
+	let minX = Number.POSITIVE_INFINITY;
+	let minY = Number.POSITIVE_INFINITY;
+	let maxX = Number.NEGATIVE_INFINITY;
+	let maxY = Number.NEGATIVE_INFINITY;
+	for (const p of px) {
+		minX = Math.min(minX, p[0]!);
+		minY = Math.min(minY, p[1]!);
+		maxX = Math.max(maxX, p[0]!);
+		maxY = Math.max(maxY, p[1]!);
+	}
 	for (let i = 1; i < px.length; i++) arc += Math.hypot(px[i]![0] - px[i - 1]![0], px[i]![1] - px[i - 1]![1]);
-	return Math.max(CLOSURE_PX, arc * CLOSURE_ARC);
+	// The absolute allowance never outruns a quarter of the ring's own diagonal, so zooming out shrinks it
+	// with the drawing instead of swallowing the drawing.
+	const extent = Math.hypot(maxX - minX, maxY - minY);
+	return Math.max(Math.min(CLOSURE_PX, extent * CLOSURE_EXTENT), arc * CLOSURE_ARC);
+}
+
+/**
+ * Does this ring cross itself? A bowtie meets every closure rule and `Polygon(points, true)` still builds a
+ * wire from it, which leaves the kernel to decide what the face is — two lobes, one lobe, or a silent mess.
+ * v1.0's answer is to refuse and say so, because the alternative is a solid the user did not draw. Proper
+ * intersections only: neighbours share an endpoint by definition, and a ring that touches itself at a single
+ * point without crossing stays drawable.
+ */
+function crossesItself(ring: [number, number][]): boolean {
+	const n = ring.length - 1; // the closing repeat, if any, is ring[0] again
+	if (n < 4) return false;
+	for (let i = 0; i < n; i++) {
+		for (let j = i + 2; j < n; j++) {
+			if (i === 0 && j === n - 1) continue; // the two ends of a closed ring, which meet by construction
+			if (properCross(ring[i]!, ring[i + 1]!, ring[j]!, ring[j + 1]!)) return true;
+		}
+	}
+	return false;
+}
+
+const side = (a: [number, number], b: [number, number], p: [number, number]): number =>
+	(b[0]! - a[0]!) * (p[1]! - a[1]!) - (b[1]! - a[1]!) * (p[0]! - a[0]!);
+
+function properCross(a: [number, number], b: [number, number], c: [number, number], d: [number, number]): boolean {
+	const d1 = side(a, b, c);
+	const d2 = side(a, b, d);
+	const d3 = side(c, d, a);
+	const d4 = side(c, d, b);
+	return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
 }
 
 /** Strokes → entities, one call per stroke: `closed` is a stroke's own verdict, and toEntities is per-stroke

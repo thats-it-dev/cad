@@ -64,11 +64,11 @@ export class CadViewer extends LitElement {
 	private overlay: Overlay | null = null;
 	private gestures: Gestures | null = null;
 	private observer: ResizeObserver | null = null;
-	/** Whether a whole part has ever been framed. Set only by fit(), so an orbit before the first build lands
-	 *  cannot make the part arrive unframed (review P2). */
+	/** Whether a real part has ever been framed. Latched by `fit()` only when there was geometry to frame, so a
+	 *  flick before the first build landed still ends with the part framed — and a zoom afterwards is not a
+	 *  reason to re-frame it. (An earlier version also watched `touched`, which made every camera move after a
+	 *  build snap back to the full-part framing: zoom and pan were dead in the built app.) */
 	private fitted = false;
-	/** Whether the camera moved since the last fit. */
-	private touched = false;
 	/** The pen stroke currently on the canvas, in the ink canvas's own px. It is not ink: ink is what a stroke became. */
 	private stroke: Pixel[] = [];
 	private frameRequested = false;
@@ -79,6 +79,14 @@ export class CadViewer extends LitElement {
 
 	protected firstUpdated(): void {
 		this.start();
+	}
+
+	connectedCallback(): void {
+		super.connectedCallback();
+		// Lit does not re-run `firstUpdated` after a re-connect, and `disconnectedCallback` throws the scene
+		// away, so a moved <cad-viewer> (Task 10's panels will move it) came back with both canvases blank for
+		// the rest of the page's life. `hasUpdated` is false on the first connect, which is `firstUpdated`'s.
+		if (this.hasUpdated) this.start();
 	}
 
 	/** Wire up the canvases. Called once from firstUpdated, and again after a re-connect, because disposing on
@@ -139,7 +147,6 @@ export class CadViewer extends LitElement {
 	private view(then: (view: NonNullable<Scene["view"]>) => void): void {
 		if (!this.scene) return;
 		then(this.scene.view);
-		this.touched = true;
 		this.invalidate();
 	}
 
@@ -180,8 +187,7 @@ export class CadViewer extends LitElement {
 	fit(): void {
 		if (!this.scene) return;
 		this.scene.fit(meshBounds(this.mesh));
-		this.fitted = true;
-		this.touched = false;
+		this.fitted = this.mesh.faceCount > 0;
 		this.invalidate();
 	}
 
@@ -197,9 +203,8 @@ export class CadViewer extends LitElement {
 	private draw(): void {
 		if (!this.scene || !this.overlay) return;
 		// A part that has never been framed gets framed, or the first thing the user sees is empty canvas.
-		// "Never been framed" means fit() has not run, not that the camera has not moved: a flick before the
-		// first build landed must still frame the part when it arrives.
-		if ((!this.fitted || (this.touched && this.mesh.faceCount > 0)) && this.mesh.faceCount > 0) this.fit();
+		// Once, not on every camera move: see `fitted`.
+		if (!this.fitted && this.mesh.faceCount > 0) this.fit();
 		this.scene.render(this.mesh, this.ink);
 		if (this.stroke.length > 1) this.overlay.polylines([this.stroke]);
 	}

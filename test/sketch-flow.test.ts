@@ -177,6 +177,54 @@ describe("closing the ring", () => {
 		expect(corners(session)[0]?.length, "the open stroke is still shown as ink").toBe(4);
 		expect(() => session.commit(12_000, false)).toThrow(/close/i);
 	});
+
+	it("refuses a 60% ring at every zoom, not only the one it was drawn at", () => {
+		// The pixel floor is what lets a pencil's overshoot meet, and a floor in pixels means different
+		// millimetres at different zooms: at 4 mm/px this ring's 39.8 mm tip gap is ~10 px, which the old
+		// 16 px floor waved through and `Polygon(points, true)` then spanned with a diagonal the pen never
+		// drew. The cap is the ring's own extent, so zooming out shrinks the allowance with the drawing.
+		for (const mmPerPx of [0.03125, 0.25, 1, 4]) {
+			const cam = camera({ mmPerPx });
+			const session = startSketch(XY, undefined, cam.view);
+			session.stroke(strokeOf(cam, SIXTY));
+			expect(() => session.commit(12_000, false), `${mmPerPx} mm/px must not accept an open C`).toThrow(/close/i);
+		}
+	});
+
+	it("still closes a 90% ring at every zoom", () => {
+		for (const mmPerPx of [0.03125, 0.25, 1, 4]) {
+			const cam = camera({ mmPerPx });
+			const session = startSketch(XY, undefined, cam.view);
+			session.stroke(strokeOf(cam, NINETY));
+			expect(session.commit(12_000, false).sketch.entities[0]?.kind, `${mmPerPx} mm/px: 90% round is a ring`).toBe("poly");
+		}
+	});
+
+	it("refuses a ring that crosses itself", () => {
+		// A bowtie meets every closure rule — the ends meet, the arc allowance is satisfied — and the kernel
+		// is then left to guess what the face is. Refusing is the v1.0 answer; the message says what to do.
+		const cam = camera({ mmPerPx: 0.25 });
+		const session = startSketch(XY, undefined, cam.view);
+		const bowtie: [number, number][] = [
+			[0, 0],
+			[40, 30],
+			[40, 0],
+			[0, 30],
+			[0, 0],
+		];
+		session.stroke(strokeOf(cam, bowtie));
+		expect(corners(session)[0]?.length, "the bowtie is drawn as ink").toBeGreaterThan(3);
+		expect(() => session.commit(12_000, false)).toThrow(/cross/i);
+	});
+
+	it("accepts a ring that merely touches itself at a corner", () => {
+		const cam = camera({ mmPerPx: 0.25 });
+		const session = startSketch(XY, undefined, cam.view);
+		// Two lobes sharing the start point, no transverse crossing: drawable, and refusing it would be
+		// refusing the figure-eight the user actually drew.
+		session.stroke(strokeOf(cam, round(RECT)));
+		expect(session.commit(12_000, false).sketch.entities[0]?.kind).toBe("poly");
+	});
 });
 
 describe("strokes and sessions", () => {
@@ -197,7 +245,10 @@ describe("strokes and sessions", () => {
 		session.stroke(strokeOf(cam, round([[60, 0], [80, 0], [80, 20], [60, 20]])));
 		const step = session.commit(12_000, false);
 		expect(step.sketch.entities).toHaveLength(2);
-		expect(step.sketch.id, "one sketch, two rings").toBe(step.sketch.id);
+		expect(step.sketch.id, "one sketch id for both rings, and a fresh one").toMatch(/^sketch-/);
+		const other = startSketch(XY, undefined, cam.view);
+		other.stroke(strokeOf(cam, round(RECT)));
+		expect(other.commit(12_000, false).sketch.id, "and a second sketch does not reuse it").not.toBe(step.sketch.id);
 		const { doc, id } = insertExtrude(newDocument(), null, step.sketch, step.depth, step.cut);
 		expect(buildScript(doc, { probes: [], buildId: "b" }).opsPerStep[id]).toBe(7);
 	});
@@ -276,7 +327,8 @@ describe("the seam Task 12 widens", () => {
 		expect(session.frame.normal).toEqual([0, 0, 1]);
 		session.stroke(strokeOf(cam, round(RECT)));
 		const [poly] = session.commit(12_000, false).sketch.entities;
-		expect(session.commit.length >= 0 && poly?.kind, "the ring is still plane µm").toBe("poly");
+		expect(poly?.kind, "the ring is still plane µm").toBe("poly");
+		if (poly?.kind === "poly") expect(poly.points[1], "and a whole millimetre off the host's origin").toEqual([40_000, 0]);
 	});
 
 	it("refuses a face sketch with no face to sit on", () => {

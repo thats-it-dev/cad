@@ -19,4 +19,3 @@ Cascade Studio only imports small ASCII stl files for now!`),null}saveShapeSTEP(
 opentype.js/dist/opentype.module.js:
   (*! https://mths.be/codepointat v0.2.0 by @mathias *)
 */
-//# sourceMappingURL=cascade-worker.js.map

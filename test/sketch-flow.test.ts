@@ -18,18 +18,21 @@ const XY: PlaneRef = { kind: "axis", axis: "XY", offset: 0 };
  * azimuth the plane is seen from. `frames` records every frame the session asked about, so a test can say
  * "the session converted through the frame it built", not just "the numbers came out right".
  */
-type Cam = { originPx?: [number, number]; mmPerPx: number; azimuth?: number };
+type Cam = { originPx?: [number, number]; mmPerPx: number; azimuth?: number; miss?: (p: InkPoint) => boolean };
+type Rig = { view: SketchView; frames: Frame2[]; cam: Cam };
 
-function camera(cam: Cam): { view: SketchView; frames: Frame2[] } {
+function camera(cam: Cam): Rig {
 	const [ox, oy] = cam.originPx ?? [300, 200];
 	const cos = Math.cos(cam.azimuth ?? 0);
 	const sin = Math.sin(cam.azimuth ?? 0);
 	const frames: Frame2[] = [];
 	return {
+		cam,
 		frames,
 		view: {
-			screenToPlane: (x, y) => {
-				frames.push(XY_FRAME);
+			screenToPlane: (x: number, y: number, frame: Frame2) => {
+				frames.push(frame);
+				if (cam.miss?.({ x, y, t: 0 })) return [Number.NaN, Number.NaN];
 				const u = (x - ox) * cam.mmPerPx;
 				const v = -(y - oy) * cam.mmPerPx;
 				return [u * cos + v * sin, -u * sin + v * cos];
@@ -37,8 +40,6 @@ function camera(cam: Cam): { view: SketchView; frames: Frame2[] } {
 		},
 	};
 }
-
-const XY_FRAME: Frame2 = { origin: [0, 0, 0], u: [1, 0, 0], v: [0, 1, 0], normal: [0, 0, 1] };
 
 /** Plane mm → client px, the inverse of `camera`'s map: where the pencil has to land for the plane to read q. */
 function pxOf(cam: Cam, q: [number, number]): InkPoint {
@@ -51,7 +52,10 @@ function pxOf(cam: Cam, q: [number, number]): InkPoint {
 }
 
 /** A pen stroke along plane targets, lifted on its last point. */
-const strokeOf = (cam: Cam, targets: [number, number][]): InkPoint[] => targets.map((q) => pxOf(cam, q));
+const strokeOf = (rig: Rig, targets: [number, number][]): InkPoint[] => targets.map((q) => pxOf(rig.cam, q));
+
+/** Corners plus the repeat back to the first: what it takes for a ring to close. */
+const round = (targets: [number, number][]): [number, number][] => [...targets, targets[0]!];
 
 /** A 40 × 30 mm rectangle, corner to corner, in plane mm. */
 const RECT: [number, number][] = [
@@ -74,7 +78,7 @@ describe("the pixel round trip is the task", () => {
 	it("commits a 40 × 30 mm rectangle as whole micrometres", () => {
 		const cam = camera({ mmPerPx: 0.25 });
 		const session = startSketch(XY, undefined, cam.view);
-		session.stroke(strokeOf(cam, [...RECT, [20, 30]]));
+		session.stroke(strokeOf(cam, round([[0, 0], [40, 0], [40, 30], [20, 30], [0, 30]])));
 		const step = session.commit(12_000, false);
 		expect(step.kind, "a committed sketch is an extrude step").toBe("extrude");
 		expect(step.sketch.entities).toEqual([{ kind: "poly", points: [[0, 0], [40_000, 0], [40_000, 30_000], [0, 30_000], [0, 0]] }]);
@@ -84,7 +88,7 @@ describe("the pixel round trip is the task", () => {
 		const want = [[0, 0], [40_000, 0], [40_000, 30_000], [0, 30_000], [0, 0]];
 		for (const cam of [camera({ mmPerPx: 0.5 }), camera({ mmPerPx: 0.03125 }), camera({ mmPerPx: 0.4, originPx: [90, 640] })]) {
 			const session = startSketch(XY, undefined, cam.view);
-			session.stroke(strokeOf(cam, RECT));
+			session.stroke(strokeOf(cam, round(RECT)));
 			expect(session.commit(12_000, false).sketch.entities[0]).toEqual({ kind: "poly", points: want });
 		}
 	});
@@ -94,7 +98,7 @@ describe("the pixel round trip is the task", () => {
 		// An axis-aligned scale alone would commit this ring rotated, which is the failure this task must not have.
 		const cam = camera({ mmPerPx: 0.25, azimuth: Math.PI / 4 });
 		const session = startSketch(XY, undefined, cam.view);
-		session.stroke(strokeOf(cam, RECT));
+		session.stroke(strokeOf(cam, round(RECT)));
 		const points = session.commit(12_000, false).sketch.entities;
 		expect(points).toEqual([{ kind: "poly", points: [[0, 0], [40_000, 0], [40_000, 30_000], [0, 30_000], [0, 0]] }]);
 	});
@@ -103,7 +107,7 @@ describe("the pixel round trip is the task", () => {
 		const cam = camera({ mmPerPx: 0.25 });
 		const session = startSketch({ kind: "axis", axis: "XY", offset: 12_000 }, undefined, cam.view);
 		expect(session.frame.origin, "the frame is on the plane, not through the origin").toEqual([0, 0, 12]);
-		session.stroke(strokeOf(cam, RECT));
+		session.stroke(strokeOf(cam, round(RECT)));
 		session.commit(12_000, false);
 		expect(cam.frames.at(-1)?.origin, "the conversion asked the camera about that frame").toEqual([0, 0, 12]);
 	});
@@ -111,7 +115,7 @@ describe("the pixel round trip is the task", () => {
 	it("reaches the kernel as whole millimetre points", () => {
 		const cam = camera({ mmPerPx: 0.25, azimuth: Math.PI / 4 });
 		const session = startSketch(XY, undefined, cam.view);
-		session.stroke(strokeOf(cam, RECT));
+		session.stroke(strokeOf(cam, round(RECT)));
 		let doc = newDocument("t");
 		const step = session.commit(12_000, false);
 		doc = insertExtrude(doc, null, step.sketch, step.depth, step.cut).doc;
@@ -126,7 +130,7 @@ describe("closing the ring", () => {
 	it("counts the closing point once", () => {
 		const cam = camera({ mmPerPx: 0.25 });
 		const session = startSketch(XY, undefined, cam.view);
-		session.stroke(strokeOf(cam, [...RECT, [0, 0]]));
+		session.stroke(strokeOf(cam, round(RECT)));
 		const [poly] = session.commit(12_000, false).sketch.entities;
 		expect(poly?.kind === "poly" && poly.points, "four corners, the start counted once").toEqual([
 			[0, 0],
@@ -142,7 +146,7 @@ describe("closing the ring", () => {
 		const session = startSketch(XY, undefined, cam.view);
 		session.stroke(strokeOf(cam, NINETY));
 		expect(session.commit(12_000, false).sketch.entities).toEqual([
-			{ kind: "poly", points: [[0, 0], [40_000, 0], [40_000, 30_000], [0, 30_000], [0, 0]] },
+			{ kind: "poly", points: [[0, 0], [40_000, 0], [40_000, 30_000], [0, 30_000], [0, 16_000], [0, 0]] },
 		]);
 	});
 
@@ -151,6 +155,8 @@ describe("closing the ring", () => {
 		// fraction, is what lets a pencil's overshoot meet.
 		const cam = camera({ mmPerPx: 0.25 });
 		const session = startSketch(XY, undefined, cam.view);
+		// The vertex where the pen stopped stays in the ring: `simplify` always keeps a stroke's last point, and
+		// it is collinear with the closing edge, so the face it bounds is the whole 5 mm square.
 		const targets: [number, number][] = [
 			[0, 0],
 			[5, 0],
@@ -159,7 +165,9 @@ describe("closing the ring", () => {
 			[0, 0.75],
 		];
 		session.stroke(strokeOf(cam, targets));
-		expect(session.commit(12_000, false).sketch.entities).toEqual([{ kind: "poly", points: [[0, 0], [5_000, 0], [5_000, 5_000], [0, 5_000], [0, 0]] }]);
+		expect(session.commit(12_000, false).sketch.entities).toEqual([
+			{ kind: "poly", points: [[0, 0], [5_000, 0], [5_000, 5_000], [0, 5_000], [0, 750], [0, 0]] },
+		]);
 	});
 
 	it("refuses a stroke that never came round", () => {
@@ -173,8 +181,11 @@ describe("closing the ring", () => {
 
 describe("strokes and sessions", () => {
 	it("does not count a coalesced tail twice", () => {
-		const held = [{ x: 10, y: 20, t: 1 }, { x: 30, y: 20, t: 2 }];
-		expect(appendInk(held, [{ x: 30, y: 20, t: 2 }]), "a move and the lift reporting one point add one point").toEqual(held);
+		const held: InkPoint[] = [
+			{ x: 10, y: 20, t: 1 },
+			{ x: 30, y: 20, t: 2 },
+		];
+		expect(appendInk(held, [{ x: 30, y: 20, t: 2 }]), "a move and the lift reporting one point add nothing").toEqual(held);
 		expect(appendInk(held, [{ x: 30, y: 20, t: 2 }, { x: 40, y: 21, t: 3 }])).toEqual([...held, { x: 40, y: 21, t: 3 }]);
 		expect(appendInk(held, []), "an empty burst changes nothing").toEqual(held);
 	});
@@ -182,8 +193,8 @@ describe("strokes and sessions", () => {
 	it("keeps two rings in one sketch and fuses them in one step", () => {
 		const cam = camera({ mmPerPx: 0.5 });
 		const session = startSketch(XY, undefined, cam.view);
-		session.stroke(strokeOf(cam, [...RECT, [0, 0]]));
-		session.stroke(strokeOf(cam, [[60, 0], [80, 0], [80, 20]]));
+		session.stroke(strokeOf(cam, round(RECT)));
+		session.stroke(strokeOf(cam, round([[60, 0], [80, 0], [80, 20], [60, 20]])));
 		const step = session.commit(12_000, false);
 		expect(step.sketch.entities).toHaveLength(2);
 		expect(step.sketch.id, "one sketch, two rings").toBe(step.sketch.id);
@@ -194,17 +205,17 @@ describe("strokes and sessions", () => {
 	it("takes the depth it is given, and refuses one that builds nothing", () => {
 		const cam = camera({ mmPerPx: 0.25 });
 		const session = startSketch(XY, undefined, cam.view);
-		session.stroke(strokeOf(cam, RECT));
+		session.stroke(strokeOf(cam, round(RECT)));
 		const cut = session.commit(6_000, true);
 		expect(cut.kind === "extrude" && cut, "a cut is an extrude step that says so").toMatchObject({ kind: "extrude", name: "Cut", depth: 6_000, cut: true });
-		session.stroke(strokeOf(cam, RECT));
+		session.stroke(strokeOf(cam, round(RECT)));
 		expect(() => session.commit(0, false)).toThrow(/depth/i);
 	});
 
 	it("consumes the sketch on commit, so Extrude twice is one step", () => {
 		const cam = camera({ mmPerPx: 0.25 });
 		const session = startSketch(XY, undefined, cam.view);
-		session.stroke(strokeOf(cam, RECT));
+		session.stroke(strokeOf(cam, round(RECT)));
 		session.commit(12_000, false);
 		expect(session.entities(), "the ink is the step now, not a pending sketch").toEqual([]);
 		expect(() => session.commit(12_000, false)).toThrow(/nothing to sketch/i);
@@ -213,11 +224,11 @@ describe("strokes and sessions", () => {
 	it("discards everything on cancel", () => {
 		const cam = camera({ mmPerPx: 0.25 });
 		const session = startSketch(XY, undefined, cam.view);
-		session.stroke(strokeOf(cam, RECT));
+		session.stroke(strokeOf(cam, round(RECT)));
 		session.cancel();
 		expect(session.entities()).toEqual([]);
 		expect(() => session.commit(12_000, false)).toThrow(/nothing to sketch/i);
-		session.stroke(strokeOf(cam, RECT));
+		session.stroke(strokeOf(cam, round(RECT)));
 		expect(session.commit(12_000, false).sketch.entities).toHaveLength(1);
 	});
 
@@ -230,15 +241,14 @@ describe("strokes and sessions", () => {
 		expect(() => session.commit(12_000, false)).toThrow(/nothing to sketch/i);
 	});
 
-	it("drops the points that miss the plane and keeps the stroke they are part of", () => {
-		const cam = camera({ mmPerPx: 0.25 });
-		const view: SketchView = {
-			screenToPlane: (x, y, frame) => (y > 400 ? [Number.NaN, Number.NaN] : cam.view.screenToPlane(x, y, frame)),
-		};
-		const session = startSketch(XY, undefined, view);
-		session.stroke(strokeOf(cam, RECT));
+	it("drops the points that miss the plane instead of poisoning the ring with NaN", () => {
+		// One corner's ray happens to run parallel to the plane. The other three stand, as a triangle, and no
+		// NaN reaches the document: Math.round(NaN) would put NaN in a step's coordinates.
+		const cam = camera({ mmPerPx: 0.25, miss: (p) => p.x > 450 && p.y > 150 });
+		const session = startSketch(XY, undefined, cam.view);
+		session.stroke(strokeOf(cam, round(RECT)));
 		expect(session.commit(12_000, false).sketch.entities).toEqual([
-			{ kind: "poly", points: [[0, 0], [40_000, 0], [40_000, 30_000], [0, 30_000], [0, 0]] },
+			{ kind: "poly", points: [[0, 0], [40_000, 30_000], [0, 30_000], [0, 0]] },
 		]);
 	});
 });
@@ -247,7 +257,7 @@ describe("the seam Task 12 widens", () => {
 	it("stores the axes the frame it drew in, at 1e6 per unit", () => {
 		const cam = camera({ mmPerPx: 0.25 });
 		const session = startSketch(XY, undefined, cam.view);
-		session.stroke(strokeOf(cam, RECT));
+		session.stroke(strokeOf(cam, round(RECT)));
 		expect(session.commit(12_000, false).sketch).toMatchObject({
 			plane: XY,
 			origin: [0, 0],
@@ -264,7 +274,7 @@ describe("the seam Task 12 widens", () => {
 		const session = startSketch(plane, { origin: [0, 0, 12], normal: [0, 0, 1] }, cam.view);
 		expect(session.frame.origin).toEqual([0, 0, 12]);
 		expect(session.frame.normal).toEqual([0, 0, 1]);
-		session.stroke(strokeOf(cam, RECT));
+		session.stroke(strokeOf(cam, round(RECT)));
 		const [poly] = session.commit(12_000, false).sketch.entities;
 		expect(session.commit.length >= 0 && poly?.kind, "the ring is still plane µm").toBe("poly");
 	});

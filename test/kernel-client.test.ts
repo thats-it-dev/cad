@@ -1,5 +1,6 @@
 // The kernel client's protocol, tested against a stub worker rather than the 21 MB wasm bundle: what gets
 // posted, what comes back, and what the client does when the worker stops talking or talks back with an error.
+import vm from "node:vm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { KernelClient, workerError, type BuildResult } from "../src/kernel/client.ts";
 import { EMPTY_MESH } from "../src/kernel/decode.ts";
@@ -284,8 +285,8 @@ describe("KernelClient: probes", () => {
 		const probes = [{ kind: "volume" as const }, { kind: "surface" as const, target: { step: "s1", role: "face" as const, index: 0 } }, { kind: "edgeLength" as const }];
 		const r = good(await client.build(doc(pad("s1")), probes));
 		const code = worker().of("Evaluate")[0].payload.code as string;
-		expect(code.split("\n")[0]).toContain("const __b =");
-		expect(code.split("\n")[0]).toContain('"__PROBE__"');
+		expect(code).toContain("const __b =");
+		expect(code).toContain('"__PROBE__"');
 		expect(probeCalls(code).map((p) => p.buildId)).toEqual([r.buildId, r.buildId, r.buildId]);
 		expect(r.probes).toEqual({
 			[`${r.buildId}|s1|volume`]: 48_000,
@@ -309,6 +310,36 @@ describe("KernelClient: probes", () => {
 		const r = good(await client.build(doc(pad("s1")), [{ kind: "volume" }]));
 		expect(Object.keys(r.probes)).toEqual([`${r.buildId}|s1|volume`]);
 		expect(Object.values(r.probes)).not.toContain(0);
+	});
+
+	it("patches console.error once per worker, not once per build", async () => {
+		// The worker runs the script through a plain `eval` inside a method (CascadeWorker.js:171), so a `const`
+		// in the preamble is scoped to that evaluation while `console.error =` writes the global. Patched
+		// unguarded, every build wraps the previous build's wrapper and delegates to it, and one kernel error
+		// posts 2^(builds-1) times. This replays the preamble the way the worker does: three builds, one context.
+		const { client, worker } = client_(answering());
+		await client.build(doc(pad("s1")), []);
+		// The client sends PROBE_PREAMBLE + script; those first four lines are the whole of what this test cares
+		// about. The rest is the script builder's geometry, which needs the kernel library.
+		const code = worker().of("Evaluate")[0].payload.code.split("\n").slice(0, 4).join("\n") as string;
+		const posted: string[] = [];
+		const sandbox = {
+			postMessage: (m: Msg) => void posted.push(String(m.payload)),
+			console: { error: (..._a: unknown[]) => {}, log: (..._a: unknown[]) => {} },
+		};
+		const ctx = vm.createContext(sandbox);
+		vm.runInContext("self = globalThis;", ctx); // the worker's global, which the sandbox object alone is not
+		const run = (why: string) => vm.runInContext(`globalThis.eval(${JSON.stringify(code)});`, ctx, { filename: why });
+		// Each build's script goes through globalThis.eval, not a bare script: `eval(payload.code)` inside the
+		// worker's evaluate method (CascadeWorker.js:171) is an INDIRECT eval, so its const bindings stay local to
+		// that evaluation while `console.error =` writes the global. A top-level script does the opposite, and the
+		// second run would throw "Identifier '__b' has already been declared" — a vm artifact, not the bug here.
+		run("build 1"); // installs the guard
+		run("build 2"); // would wrap build 1's wrapper without it
+		run("build 3");
+		sandbox.console.error("boolean failed");
+		// Without the guard this array holds 4 entries: three wrappers, one of them reached 2^2 times over.
+		expect(posted.filter((p) => p.startsWith("__ERROR__"))).toEqual(["__ERROR__boolean failed"]);
 	});
 });
 

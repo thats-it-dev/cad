@@ -56,9 +56,14 @@ const ERROR_PREFIX = "__ERROR__";
  *  call made during evaluate lands before any of that, and the reply to combineAndRenderShapes is itself
  *  posted synchronously from the same turn, so ordering is: geometry, its errors and probes, then the settle. */
 const PROBE_PREAMBLE =
-	`const __b = (buildId, stepId, kind, value) => self.postMessage({ type: "log", payload: "${PROBE_PREFIX}" + buildId + "|" + stepId + "|" + kind + "|" + value });
+	`self.__cadLog = (p) => self.postMessage({ type: "log", payload: p });
 ` +
-	`const __console0 = console.error; console.error = (...a) => { self.postMessage({ type: "log", payload: "${ERROR_PREFIX}" + a.map((x) => (x && x.message ? x.message : String(x))).join(" ") }); return __console0.apply(console, a); };
+	`const __b = (buildId, stepId, kind, value) => self.__cadLog("${PROBE_PREFIX}" + buildId + "|" + stepId + "|" + kind + "|" + value);
+` +
+	// Guarded by a worker global, not by a const: the script runs through a plain `eval`, so a const is scoped to
+	// this evaluation while `console.error = ` writes the global. Unguarded, every build would wrap the previous
+	// build's wrapper and delegate to it, and one kernel error would be posted 2^(builds-1) times.
+	`if (!self.__cadPatched) { self.__cadPatched = true; const __console0 = console.error; console.error = (...a) => { self.__cadLog("${ERROR_PREFIX}" + a.map((x) => (x && x.message ? x.message : String(x))).join(" ")); return __console0.apply(console, a); }; }
 `;
 
 /** An ErrorEvent is a browser global; it is absent on Node < 26, which is what CI runs. Everything the app

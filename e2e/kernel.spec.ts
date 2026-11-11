@@ -50,8 +50,18 @@ test("the real kernel builds a solid and measures the box it built", async ({ pa
 	const bench = r.deviations[String(0.1)].build;
 	expect(bench.buildId, "a rebuild must carry a new build id").not.toBe(r.box.buildId);
 	expect(bench.probeKey).toBe(`${bench.buildId}|${bench.stepId}|volume`);
-	// The kernel's cache is off on every build, so timing five rebuilds measures five rebuilds.
-	expect(r.cacheLine, "the worker's own cache tally, on the log channel").toContain("0 hits");
+	// The kernel resets its cache counters at the start of every evaluate (CascadeWorker.js:161-164) and prints
+	// the tally at the end of the same one, so each build carries its own evidence that nothing was memoised.
+	const hitsRe = /Cache: (\d+) hits/;
+	for (const [line, label] of [
+		[bench.cacheLine, "the 20-step rebuild"],
+		[r.box.cacheLine, "the box build"],
+	] as const) {
+		expect(line, `the worker's own cache tally for ${label}`).toMatch(hitsRe);
+		expect(Number(hitsRe.exec(line)?.[1]), `${label} must not hit the cache`).toBe(0);
+	}
+
+	expect(r.errorGrowth, "clean builds must add no console.error reports").toBe(0);
 
 	// And the numbers themselves: all of them present, none of them zero.
 	for (const deviation of ["0.1", "0.02"]) {

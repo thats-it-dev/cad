@@ -20,27 +20,37 @@ geometry is real. Two parts, deliberately:
   `KernelClient` reports as failed. **The bench is for time; the box is for truth.** Never assert volume on the bench.
 
 Re-run it: `npx playwright test e2e/kernel.spec.ts --project=desktop --reporter=list` prints every number as a
-`stage0 <name> <ms>` line, or open `/spike/stage0/index.html` on the device you want to measure (it starts on
-load; "Run again" repeats without re-fetching the wasm).
+`stage0 <name> <ms>` line. To measure a device that cannot run a dev server, build with the spike in
+(`CAD_SPIKE=1 npm run build && npm run preview`) and open `/spike/stage0/index.html` on it — the spike page is
+opt-in and never ships in a deploy build (vite.config.ts:9-15), so it exists only on a branch preview or a local
+server. It starts on load; "Run again" repeats without re-fetching the wasm.
 
 ## The numbers
 
 Measured 2026-11-11 on the spark — Linux aarch64 (DGX Spark, 20 cores), Chromium through Playwright 1.64, served
-by `vite preview` on localhost. The wasm is 21241345 bytes (20.25 MiB) and the browser's HTTP cache was cold per
-run (a fresh context each time).
+by `vite preview` on localhost. The wasm is 21241345 bytes (20.25 MiB) and it came out of the browser's HTTP
+cache: 135 ms cannot be a 20 MiB fetch, and the file name is hashed with `Cache-Control: immutable`, so a repeat
+visit never re-pulls it. First visit on a device pays that fetch on top of `kernel load` below — for the iPad it
+is the Tailscale round trip, not the compute, that dominates.
 
 | what | `maxDeviation` 0.1 mm | `maxDeviation` 0.02 mm |
 | --- | --- | --- |
-| kernel load: worker + 20.25 MiB wasm | 131 ms | — |
+| kernel load: worker + 20.25 MiB wasm (HTTP-cached) | 135 ms | — |
 | rebuild, 1 step (the box) | 44 ms | — |
-| **rebuild, 20 steps (the bench)** | **815 ms** median (952, 825, 815, 807, 806) | 814 ms median (997, 828, 814, 808, 806) |
-| preview: `meshHistoryStep` on the last step | 78 ms median (78, 78, 78, 77, 78) | not run |
+| **rebuild, 20 steps (the bench)** | **815 ms** median (946, 816, 804, 800, 799) | 814 ms median (982, 822, 814, 808, 806) |
+| preview: `meshHistoryStep` on the last step | 78 ms median (79, 77, 79, 78, 77) | not run |
 | export: `saveShapeSTEP` | 92 ms | 90 ms |
 | volume probe | box 14400, bench 11664 mm³ | same |
 
-Both the cache and the measurement plumbing checked out: the worker's own log line reads `Cache: 0 hits, 3
-misses`, so nothing behind these rebuilds is memoised, and every probe reading arrived under the build id of the
-build that asked for it (the bench build's id differs from the box's, asserted in `e2e/kernel.spec.ts`).
+Nothing behind these rebuilds is memoised, and that is now measured rather than asserted: the kernel zeroes its
+cache counters at the start of every `evaluate` and prints its own tally at the end of the same one
+(CascadeWorker.js:161-192), so the bench carries a per-build `Cache: 0 hits, 3 misses` line and
+`e2e/kernel.spec.ts` parses the hit count out of it — `toContain("0 hits")` would have been satisfied by
+"100 hits". Every probe reading arrived under the build id of the build that asked for it (the bench build's id
+differs from the box's, also asserted). And `error-growth 0` confirms the client's `console.error` patch does not
+nest across the ~12 builds one worker runs: the script arrives through a plain `eval` inside a method, so `const`
+bindings are per-build while `console.error =` writes the global — an unguarded patch would have multiplied each
+kernel error by 2^(builds-1).
 
 ## The decision
 

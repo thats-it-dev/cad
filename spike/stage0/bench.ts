@@ -32,7 +32,7 @@ const AXES: Sketch["axes"] = [
 	[0, 1_000_000, 0],
 ];
 
-export type Build = { buildId: string; stepId: string; ok: boolean; error: string | null; faceCount: number; ms: number; probeKey: string | null; volume: number | null };
+export type Build = { buildId: string; stepId: string; ok: boolean; error: string | null; faceCount: number; ms: number; probeKey: string | null; volume: number | null; cacheLine: string };
 
 export type Deviation = {
 	build: Build;
@@ -46,10 +46,15 @@ export type Deviation = {
 
 export type Stage0 = {
 	loadMs: number;
-	/** The worker's own cache tally from its `log` channel: "hits" must stay 0 while the cache is off. */
+	/** The worker's cache tally printed by the box build's own evaluate. */
 	cacheLine: string;
+	cacheLines: string[];
 	/** What the kernel reported through `onError`, including faults a build shrugged off. */
 	kernelErrors: string[];
+	/** Extra `console.error` reports across the last two builds of one worker. The client patches console.error
+	 *  from inside the eval'd script, so an unguarded patch wraps the previous build's wrapper and one error is
+	 *  posted twice per build after it. Three clean builds must add nothing; anything over 0 means nesting. */
+	errorGrowth: number;
 	box: Build;
 	deviations: Record<string, Deviation>;
 };
@@ -98,7 +103,7 @@ function volumeReading(result: BuildResult): { key: string | null; value: number
 
 let client: KernelClient | null = null;
 let stepFile = "";
-let cacheLine = "";
+let cacheLines: string[] = [];
 const lines: string[] = [];
 
 /** One measured number, printed as `stage0 <name> <value>` for e2e/kernel.spec.ts to read, and listed on the
@@ -120,7 +125,7 @@ async function open(maxDeviation: number, errors: string[]): Promise<number> {
 		onError: (e) => errors.push(e.message),
 		onCrash: (e) => errors.push(e.message),
 		onLog: (line) => {
-			if (line.includes("hits")) cacheLine = line;
+			if (line.includes("hits")) cacheLines.push(line);
 		},
 	});
 	client = next;
@@ -134,7 +139,11 @@ const kernel = (): KernelClient => {
 
 /** One build of `doc`, timed, reduced to the numbers the page reports. */
 async function once(doc: CadDocument, label: string): Promise<Build> {
+	const before = cacheLines.length;
 	const [ms, build] = await timed(() => kernel().build(doc, [{ kind: "volume" }]));
+	// The worker prints its own tally at the end of the evaluate that asked for it, so the line that appeared
+	// during this build is this build's evidence. `cacheLines` only grows on the log channel, synchronously.
+	const fresh = cacheLines.slice(before);
 	const probe = volumeReading(build);
 	const value: Build = {
 		buildId: build.buildId,
@@ -145,6 +154,7 @@ async function once(doc: CadDocument, label: string): Promise<Build> {
 		ms: round(ms),
 		probeKey: probe.key,
 		volume: probe.value ?? null,
+		cacheLine: fresh.at(-1) ?? "",
 	};
 	say(label, value.ms);
 	if (value.volume !== null) say(`volume-after-${label}`, value.volume);
@@ -158,7 +168,7 @@ export async function runBench(): Promise<Stage0> {
 	const loadMs = await open(DEVIATIONS[0], kernelErrors);
 	say("load", round(loadMs));
 	const box = await once(boxDoc(), "rebuild-1-step");
-	say("cache", cacheLine);
+	say("cache", box.cacheLine);
 
 	const doc = benchDoc();
 	// The last op of the last step is the solid the optimistic preview would draw while a rebuild catches up.
@@ -166,6 +176,7 @@ export async function runBench(): Promise<Stage0> {
 	const lastOp = buildScript(doc, { probes: [], buildId: "spike" }).opsPerStep[stepId] - 1;
 	const deviations: Record<string, Deviation> = {};
 
+	let errorGrowth = 0;
 	for (const maxDeviation of DEVIATIONS) {
 		status(`maxDeviation ${maxDeviation}: ${REPEATS} rebuilds…`);
 		// The boot worker already has the first quality, so only a change of `maxDeviation` pays for a new one.
@@ -175,6 +186,10 @@ export async function runBench(): Promise<Stage0> {
 		for (let i = 1; i < REPEATS; i++) run.rebuildMs.push((await once(doc, `rebuild-20-step@${maxDeviation}`)).ms);
 
 		if (maxDeviation === DEVIATIONS[0]) {
+			// Nine round trips have run in this one worker by now (the box, six rebuilds, and the previews below,
+			// which are Evaluates too). A console.error patch that nested would report each kernel error once per
+			// build after it, so with nine builds and one error the count would reach 256 rather than 1.
+			const errorsBefore = kernelErrors.length;
 			status("meshHistoryStep on its own…");
 			for (let i = 0; i < REPEATS; i++) {
 				const [ms, mesh] = await timed(() => kernel().preview(stepId, lastOp));
@@ -182,6 +197,8 @@ export async function runBench(): Promise<Stage0> {
 				run.previewFaces = mesh.faceCount;
 				say(`preview@${maxDeviation}`, round(ms));
 			}
+			errorGrowth = kernelErrors.length - errorsBefore;
+			say("error-growth", errorGrowth);
 		}
 
 		status("exporting STEP…");
@@ -197,7 +214,15 @@ export async function runBench(): Promise<Stage0> {
 	client?.dispose();
 	say(`median-rebuild-20-step@${DEVIATIONS[0]}`, round(median(deviations[String(DEVIATIONS[0])].rebuildMs)));
 	save.hidden = stepFile.length === 0;
-	return { loadMs: round(loadMs), cacheLine, kernelErrors, box, deviations };
+	return {
+		loadMs: round(loadMs),
+		cacheLine: box.cacheLine,
+		cacheLines,
+		kernelErrors,
+		errorGrowth,
+		box,
+		deviations,
+	};
 }
 
 const status = (line: string): void => {

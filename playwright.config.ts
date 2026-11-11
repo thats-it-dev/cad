@@ -14,5 +14,5 @@ export default defineConfig({
 		{ name: "phone", use: { ...devices["Desktop Chrome"], viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true } },
 		{ name: "desktop", use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 800 } } },
 	],
-	webServer: base ? undefined : { command: "npm run build && npx vite preview --port 4317 --strictPort", port: 4317, reuseExistingServer: false, timeout: 120_000 },
+	webServer: base ? undefined : { command: "npm run build && npx vite preview --port 4317 --strictPort", env: { CAD_SPIKE: "1" }, port: 4317, reuseExistingServer: false, timeout: 120_000 },
 });

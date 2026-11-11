@@ -1,0 +1,47 @@
+<!doctype html>
+<!--
+  Stage 0 spike: one page that runs the real kernel and prints the numbers docs/stage0.md records.
+  Built as a second rollup input (see vite.config.ts) so `vite preview` serves it over HTTP on any device,
+  which is the only way to time the iPad. Deliberately no kit, no Lit, no service worker: nothing here but
+  the kernel should be on the clock.
+-->
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>cad — stage 0 spike</title>
+		<style>
+			body {
+				margin: 16px;
+				font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+			}
+			h1 {
+				font-size: 18px;
+			}
+			pre {
+				white-space: pre-wrap;
+				word-break: break-all;
+			}
+			button {
+				font: inherit;
+				padding: 6px 12px;
+			}
+			#status {
+				font-weight: 700;
+			}
+		</style>
+	</head>
+	<body>
+		<h1>Stage 0 — kernel latency</h1>
+		<p id="status">starting…</p>
+		<p>
+			<button id="go" type="button">Run again</button>
+			<button id="save" type="button" hidden>Save STEP</button>
+		</p>
+		<h2>Numbers</h2>
+		<pre id="lines"></pre>
+		<h2>JSON</h2>
+		<pre id="result"></pre>
+		<script type="module" src="./bench.ts"></script>
+	</body>
+</html>

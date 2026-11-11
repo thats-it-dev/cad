@@ -17,5 +17,5 @@
 			"https://kit.thatsit.app/lit.js": ["./.kit/types/lit.d.ts"]
 		}
 	},
-	"include": ["src", "vite", "scripts", "test", "*.ts"]
+	"include": ["src", "vite", "scripts", "test", "spike", "*.ts"]
 }

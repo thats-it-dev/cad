@@ -208,6 +208,7 @@ export async function runBench(): Promise<Stage0> {
 			}
 			errorGrowth = kernelErrors.length - errorsBefore;
 			say("error-growth", errorGrowth);
+			say("samples-preview", run.previewMs.join(", "));
 			say("median-preview", round(median(run.previewMs)));
 		}
 

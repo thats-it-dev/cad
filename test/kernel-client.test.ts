@@ -331,14 +331,10 @@ describe("KernelClient: probes", () => {
 		vm.runInContext("self = globalThis;", ctx); // the worker's global, which the sandbox object alone is not
 		const run = (why: string) => vm.runInContext(`globalThis.eval(${JSON.stringify(code)});`, ctx, { filename: why });
 		// Each build's script goes through globalThis.eval, not a bare script: `eval(payload.code)` inside the
-		// worker's evaluate method (public/kernel/cascade-worker.js:16) is an INDIRECT eval, so its const
-		// bindings stay local to
-		// that evaluation while `console.error =` writes the global. A top-level script does the opposite, and the
-		// second run would throw "Identifier '__b' has already been declared" — a vm artifact, not the bug here.
-		// Each build's script goes through globalThis.eval, not a bare script: the worker's `eval(payload.code)`
-		// sits inside its evaluate method, so it is an INDIRECT eval — its const bindings stay local to that
-		// evaluation while `console.error =` writes the global. A top-level script does the opposite, and the
-		// second run would throw "Identifier '__b' has already been declared": a vm artifact, not the bug here.
+		// worker's evaluate method (public/kernel/cascade-worker.js:16) is an INDIRECT eval — its const bindings
+		// stay local to that evaluation while `console.error =` writes the global. A top-level script does the
+		// opposite, and the second run would throw "Identifier '__b' has already been declared": a vm artifact,
+		// not the bug here.
 		run("build 1"); // installs the guard
 		run("build 2"); // would wrap build 1's wrapper without it
 		run("build 3");

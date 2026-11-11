@@ -50,15 +50,15 @@ const PROBE_PREFIX = "__PROBE__";
 const PROBE_LINE = /^__PROBE__([^|]+)\|([^|]+)\|([^|]+)\|(-?[\d.eE+-]+)$/;
 const ERROR_PREFIX = "__ERROR__";
 
+/** Marks the end of the preamble inside the code sent to the worker, so a test can take the preamble out of a
+ *  real Evaluate payload without counting lines of someone else's formatting. */
+export const PREAMBLE_END = "/*__CAD_PREAMBLE__*/";
+
 /** Both channels post directly rather than through console: the shipped worker wraps console.error in a throw
  *  from a setTimeout and posts console.log from one too (public/kernel/cascade-worker.js:16), which is how a
  *  failure ends up arriving AFTER the mesh reply and being read as success. A synchronous postMessage from a
  *  call made during evaluate lands before any of that, and the reply to combineAndRenderShapes is itself
  *  posted synchronously from the same turn, so ordering is: geometry, its errors and probes, then the settle. */
-/** Marks the end of the preamble inside the code sent to the worker, so a test can take the preamble out of a
- *  real Evaluate payload without counting lines of someone else's formatting. */
-export const PREAMBLE_END = "/*__CAD_PREAMBLE__*/";
-
 const PROBE_PREAMBLE =
 	`self.__cadLog = (p) => self.postMessage({ type: "log", payload: p });
 ` +

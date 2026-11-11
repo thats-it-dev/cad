@@ -27,30 +27,40 @@ server. It starts on load; "Run again" repeats without re-fetching the wasm.
 
 ## The numbers
 
-Measured 2026-11-11 on the spark — Linux aarch64 (DGX Spark, 20 cores), Chromium through Playwright 1.64, served
-by `vite preview` on localhost. The wasm is 21241345 bytes (20.25 MiB) and it came out of the browser's HTTP
-cache: 135 ms cannot be a 20 MiB fetch, and the file name is hashed with `Cache-Control: immutable`, so a repeat
-visit never re-pulls it. First visit on a device pays that fetch on top of `kernel load` below — for the iPad it
-is the Tailscale round trip, not the compute, that dominates.
+Measured 2026-11-11 on the spark — Linux aarch64 (DGX Spark, 20 cores), Chromium through Playwright 1.64, one
+`--project=desktop` run of `e2e/kernel.spec.ts`, served by `vite preview` on localhost. Every number in the table
+is from that single run, and each is a line the harness printed (the rebuild rows carry the harness's own
+`samples-…` and `median-…` lines rather than numbers pasted in by hand). The wasm is 21241345 bytes (20.25 MiB)
+and it came out of the browser's HTTP cache: 130 ms cannot be a 20 MiB fetch. It is not content-hashed —
+`public/kernel/` is copied verbatim to `dist/kernel/` — so the caching comes from the long `Cache-Control` on
+that stable URL, not from the file name. A device's first visit pays that fetch on top of `kernel load`: for the
+iPad it will be the Tailscale round trip, not the compute, that dominates.
 
 | what | `maxDeviation` 0.1 mm | `maxDeviation` 0.02 mm |
 | --- | --- | --- |
-| kernel load: worker + 20.25 MiB wasm (HTTP-cached) | 135 ms | — |
-| rebuild, 1 step (the box) | 44 ms | — |
-| **rebuild, 20 steps (the bench)** | **815 ms** median (946, 816, 804, 800, 799) | 814 ms median (982, 822, 814, 808, 806) |
-| preview: `meshHistoryStep` on the last step | 78 ms median (79, 77, 79, 78, 77) | not run |
-| export: `saveShapeSTEP` | 92 ms | 90 ms |
+| kernel load: worker + 20.25 MiB wasm (HTTP-cached) | 130 ms | — |
+| rebuild, 1 step (the box) | 45 ms | — |
+| **rebuild, 20 steps (the bench)** | **816 ms** median (972, 826, 816, 810, 810) | 809 ms median (985, 826, 809, 803, 801) |
+| preview: `meshHistoryStep` on the last step | 79 ms median (79, 79, 79, 78, 77) | not run |
+| export: `saveShapeSTEP` | 88 ms | 88 ms |
 | volume probe | box 14400, bench 11664 mm³ | same |
 
-Nothing behind these rebuilds is memoised, and that is now measured rather than asserted: the kernel zeroes its
-cache counters at the start of every `evaluate` and prints its own tally at the end of the same one
-(CascadeWorker.js:161-192), so the bench carries a per-build `Cache: 0 hits, 3 misses` line and
-`e2e/kernel.spec.ts` parses the hit count out of it — `toContain("0 hits")` would have been satisfied by
-"100 hits". Every probe reading arrived under the build id of the build that asked for it (the bench build's id
-differs from the box's, also asserted). And `error-growth 0` confirms the client's `console.error` patch does not
-nest across the ~12 builds one worker runs: the script arrives through a plain `eval` inside a method, so `const`
-bindings are per-build while `console.error =` writes the global — an unguarded patch would have multiplied each
-kernel error by 2^(builds-1).
+Nothing behind these rebuilds is memoised, and that is measured rather than asserted: the shipped worker zeroes
+`cacheHits` and `cacheMisses` at the top of its `evaluate` and prints the tally at the end of the same one
+(`public/kernel/cascade-worker.js:16`), so every build carries its own `Cache: 0 hits, N misses` line and
+`e2e/kernel.spec.ts` parses the hit count out of it — `toContain("0 hits")` would have been satisfied by "100
+hits". The mechanism is worth stating exactly, because it cuts against intuition: with the cache off the kernel
+never *stores*, so it can never *hit*. "0 hits" is what turning the cache off looks like, and it is per evaluate,
+not cumulative. Every probe reading arrived under the build id of the build that asked for it (the bench build's
+id differs from the box's, also asserted).
+
+`error-growth 0` is a tripwire, not a proof: clean builds raise no `console.error`, so it reads 0 whether or not
+the patch nests. The proof is the unit test in `test/kernel-client.test.ts`, which evals the preamble three times
+in one worker-like context and asserts one report per error — 3 reports unguarded, 1 guarded. The reason nesting
+was possible at all: the worker runs the script through `eval(payload.code)` inside its `evaluate` method, which
+is an *indirect* eval, so a `const` in the client's preamble is scoped to that single evaluation while
+`console.error =` writes the shared global. Growth is linear (one post, then one call into the previous wrapper),
+not exponential.
 
 ## The decision
 

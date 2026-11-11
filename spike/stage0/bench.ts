@@ -141,8 +141,11 @@ const kernel = (): KernelClient => {
 async function once(doc: CadDocument, label: string): Promise<Build> {
 	const before = cacheLines.length;
 	const [ms, build] = await timed(() => kernel().build(doc, [{ kind: "volume" }]));
-	// The worker prints its own tally at the end of the evaluate that asked for it, so the line that appeared
-	// during this build is this build's evidence. `cacheLines` only grows on the log channel, synchronously.
+	// The worker prints its tally at the end of the evaluate that asked for it, and the reply that settles this
+	// await is posted in that same turn, so a line added during this build is this build's evidence. A tally that
+	// arrives one setTimeout late lands in the next window instead: fresh can then hold the neighbour's line, or
+	// nothing at all (empty string, which e2e/kernel.spec.ts fails loudly on). Every line reads "0 hits" while
+	// the cache is off, so the number that matters is not the attribution but the count of zeroes.
 	const fresh = cacheLines.slice(before);
 	const probe = volumeReading(build);
 	const value: Build = {
@@ -184,11 +187,17 @@ export async function runBench(): Promise<Stage0> {
 		const run: Deviation = { build: await once(doc, `rebuild-20-step@${maxDeviation}`), rebuildMs: [], previewMs: [], exportMs: [], previewFaces: 0, stepBytes: 0 };
 		run.rebuildMs.push(run.build.ms);
 		for (let i = 1; i < REPEATS; i++) run.rebuildMs.push((await once(doc, `rebuild-20-step@${maxDeviation}`)).ms);
+		// Samples and median printed from one object, so docs/stage0.md cannot drift: an earlier version pasted
+		// five numbers from one run against a median from another, and the two disagreed.
+		say(`samples-rebuild-20-step@${maxDeviation}`, run.rebuildMs.join(", "));
+		say(`median-rebuild-20-step@${maxDeviation}`, round(median(run.rebuildMs)));
 
 		if (maxDeviation === DEVIATIONS[0]) {
-			// Nine round trips have run in this one worker by now (the box, six rebuilds, and the previews below,
-			// which are Evaluates too). A console.error patch that nested would report each kernel error once per
-			// build after it, so with nine builds and one error the count would reach 256 rather than 1.
+			// A console.error patch that nested would report every kernel error once per build since the first
+			// patch, so an error during the box or these builds would show up here as a count above 1. Clean builds
+			// read 0 guarded or unguarded: this is a tripwire, and the unit test in test/kernel-client.test.ts is
+			// the confirmation. One caveat: a kernel error can also be rethrown one task late by the client's
+			// settle path, and if that lands inside this window it counts here.
 			const errorsBefore = kernelErrors.length;
 			status("meshHistoryStep on its own…");
 			for (let i = 0; i < REPEATS; i++) {
@@ -199,6 +208,7 @@ export async function runBench(): Promise<Stage0> {
 			}
 			errorGrowth = kernelErrors.length - errorsBefore;
 			say("error-growth", errorGrowth);
+			say("median-preview", round(median(run.previewMs)));
 		}
 
 		status("exporting STEP…");
@@ -212,7 +222,6 @@ export async function runBench(): Promise<Stage0> {
 	}
 
 	client?.dispose();
-	say(`median-rebuild-20-step@${DEVIATIONS[0]}`, round(median(deviations[String(DEVIATIONS[0])].rebuildMs)));
 	save.hidden = stepFile.length === 0;
 	return {
 		loadMs: round(loadMs),

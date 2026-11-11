@@ -2,7 +2,7 @@
 // posted, what comes back, and what the client does when the worker stops talking or talks back with an error.
 import vm from "node:vm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { KernelClient, workerError, type BuildResult } from "../src/kernel/client.ts";
+import { KernelClient, PREAMBLE_END, workerError, type BuildResult } from "../src/kernel/client.ts";
 import { EMPTY_MESH } from "../src/kernel/decode.ts";
 import type { CadDocument, Entity, Step } from "../src/model/types.ts";
 
@@ -313,15 +313,15 @@ describe("KernelClient: probes", () => {
 	});
 
 	it("patches console.error once per worker, not once per build", async () => {
-		// The worker runs the script through a plain `eval` inside a method (CascadeWorker.js:171), so a `const`
-		// in the preamble is scoped to that evaluation while `console.error =` writes the global. Patched
-		// unguarded, every build wraps the previous build's wrapper and delegates to it, and one kernel error
-		// posts 2^(builds-1) times. This replays the preamble the way the worker does: three builds, one context.
+		// The worker runs the script through `eval(payload.code)` inside its evaluate method, which is an
+		// indirect eval: a `const` in the preamble is scoped to that one evaluation while `console.error =`
+		// writes the global. Patched unguarded, every build wraps the previous build's wrapper and delegates to
+		// it, so one kernel error is reported once per build since the first patch. Three builds, one context.
 		const { client, worker } = client_(answering());
 		await client.build(doc(pad("s1")), []);
-		// The client sends PROBE_PREAMBLE + script; those first four lines are the whole of what this test cares
-		// about. The rest is the script builder's geometry, which needs the kernel library.
-		const code = worker().of("Evaluate")[0].payload.code.split("\n").slice(0, 4).join("\n") as string;
+		// Everything up to the client's own end-of-preamble marker; past it is the script builder's geometry,
+		// which needs the kernel library and would throw in this bare context.
+		const code = worker().of("Evaluate")[0].payload.code.split(PREAMBLE_END)[0] as string;
 		const posted: string[] = [];
 		const sandbox = {
 			postMessage: (m: Msg) => void posted.push(String(m.payload)),
@@ -331,14 +331,20 @@ describe("KernelClient: probes", () => {
 		vm.runInContext("self = globalThis;", ctx); // the worker's global, which the sandbox object alone is not
 		const run = (why: string) => vm.runInContext(`globalThis.eval(${JSON.stringify(code)});`, ctx, { filename: why });
 		// Each build's script goes through globalThis.eval, not a bare script: `eval(payload.code)` inside the
-		// worker's evaluate method (CascadeWorker.js:171) is an INDIRECT eval, so its const bindings stay local to
+		// worker's evaluate method (public/kernel/cascade-worker.js:16) is an INDIRECT eval, so its const
+		// bindings stay local to
 		// that evaluation while `console.error =` writes the global. A top-level script does the opposite, and the
 		// second run would throw "Identifier '__b' has already been declared" — a vm artifact, not the bug here.
+		// Each build's script goes through globalThis.eval, not a bare script: the worker's `eval(payload.code)`
+		// sits inside its evaluate method, so it is an INDIRECT eval — its const bindings stay local to that
+		// evaluation while `console.error =` writes the global. A top-level script does the opposite, and the
+		// second run would throw "Identifier '__b' has already been declared": a vm artifact, not the bug here.
 		run("build 1"); // installs the guard
 		run("build 2"); // would wrap build 1's wrapper without it
 		run("build 3");
 		sandbox.console.error("boolean failed");
-		// Without the guard this array holds 4 entries: three wrappers, one of them reached 2^2 times over.
+		// The wrapper posts once and then delegates to the one wrapper before it, so growth is linear: an
+		// unguarded patch gives three reports for three builds. Confirmed by removing the guard.
 		expect(posted.filter((p) => p.startsWith("__ERROR__"))).toEqual(["__ERROR__boolean failed"]);
 	});
 });

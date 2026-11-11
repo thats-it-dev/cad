@@ -50,20 +50,26 @@ const PROBE_PREFIX = "__PROBE__";
 const PROBE_LINE = /^__PROBE__([^|]+)\|([^|]+)\|([^|]+)\|(-?[\d.eE+-]+)$/;
 const ERROR_PREFIX = "__ERROR__";
 
-/** Both channels post directly rather than through console: the worker's own overrides (CascadeWorker.js:46-62)
- *  put console.log behind a setTimeout and turn console.error into a throw from a setTimeout, which is how a
+/** Both channels post directly rather than through console: the shipped worker wraps console.error in a throw
+ *  from a setTimeout and posts console.log from one too (public/kernel/cascade-worker.js:16), which is how a
  *  failure ends up arriving AFTER the mesh reply and being read as success. A synchronous postMessage from a
  *  call made during evaluate lands before any of that, and the reply to combineAndRenderShapes is itself
  *  posted synchronously from the same turn, so ordering is: geometry, its errors and probes, then the settle. */
+/** Marks the end of the preamble inside the code sent to the worker, so a test can take the preamble out of a
+ *  real Evaluate payload without counting lines of someone else's formatting. */
+export const PREAMBLE_END = "/*__CAD_PREAMBLE__*/";
+
 const PROBE_PREAMBLE =
 	`self.__cadLog = (p) => self.postMessage({ type: "log", payload: p });
 ` +
 	`const __b = (buildId, stepId, kind, value) => self.__cadLog("${PROBE_PREFIX}" + buildId + "|" + stepId + "|" + kind + "|" + value);
 ` +
-	// Guarded by a worker global, not by a const: the script runs through a plain `eval`, so a const is scoped to
-	// this evaluation while `console.error = ` writes the global. Unguarded, every build would wrap the previous
-	// build's wrapper and delegate to it, and one kernel error would be posted 2^(builds-1) times.
+	// Guarded by a worker global, not by a const: the worker runs this through `eval(payload.code)` inside its
+	// evaluate method, which is an indirect eval, so a const here is scoped to that one evaluation while
+	// `console.error =` writes the shared global. Unguarded, every build would wrap the previous build's wrapper
+	// and delegate to it, and one kernel error would be posted once per build since the first patch.
 	`if (!self.__cadPatched) { self.__cadPatched = true; const __console0 = console.error; console.error = (...a) => { self.__cadLog("${ERROR_PREFIX}" + a.map((x) => (x && x.message ? x.message : String(x))).join(" ")); return __console0.apply(console, a); }; }
+${PREAMBLE_END}
 `;
 
 /** An ErrorEvent is a browser global; it is absent on Node < 26, which is what CI runs. Everything the app

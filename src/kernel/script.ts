@@ -2,7 +2,7 @@
 // Two rules hold this together. Geometry leaves here as *points*, never as a kernel `Sketch`: every sketch
 // plane point is lifted into model space with the step's frame and printed in millimetres, so the kernel sees
 // plain coordinates. And every operation gets its own line because the worker keys its model history by
-// `lineNumber` (CascadeWorker.js:180-189) — `opsPerStep` is the count of those lines per step, and Task 6
+// `lineNumber` (public/kernel/cascade-worker.js:16, evaluate) — `opsPerStep` is the count of those lines per step, and Task 6
 // reads it to address `meshHistoryStep`, which means one step's ops must sit side by side.
 import { mm, type Umm } from "../model/units.ts";
 import type { CadDocument, Entity, Sketch, Step, TopoRef } from "../model/types.ts";
@@ -106,7 +106,7 @@ function buildExtrude(step: Extrude, names: Names, body: string | null): Built {
  * A step this build cannot express: a sketch on a face (no 3D anchor is stored for it, Task 12) or a kind this
  * version cannot read. It emits no operation, so its count in `opsPerStep` is 0, and it threads `null` — the
  * next boolean cuts from nothing and the build renders nothing. A skipped step is logged by the worker as
- * "Null Shape detected in sceneShapes; skipping" (CascadeWorker.js:218), which is not a build failure.
+ * "Null Shape detected in sceneShapes; skipping" (public/kernel/cascade-worker.js:16), which is not a build failure.
  */
 function unbuilt(step: Step, names: Names): Built {
 	const why =

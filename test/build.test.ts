@@ -38,14 +38,18 @@ describe("vite build", () => {
 		// beforeAll built with no CAD_SPIKE, which is what the deploy job runs (deploy.yml:85).
 		expect(existsSync(new URL("dist/spike", root)), "a reachable bench page on cad.thatsit.app").toBe(false);
 		// The flag has to actually work, or the iPad row of stage0.md is unmeasurable: the fix for the finding
-		// above must not become a new silent failure.
-		execFileSync("npx", ["vite", "build", "--outDir", ".spike-dist", "--emptyOutDir"], {
-			cwd: root,
-			stdio: "pipe",
-			env: { ...process.env, CAD_SPIKE: "1" },
-		});
-		expect(existsSync(new URL(".spike-dist/spike/stage0/index.html", root))).toBe(true);
-		rmSync(new URL(".spike-dist", root), { recursive: true, force: true });
+		// above must not become a new silent failure. try/finally so a failed assertion does not leave a second
+		// build tree in the working copy.
+		try {
+			execFileSync("npx", ["vite", "build", "--outDir", ".spike-dist", "--emptyOutDir"], {
+				cwd: root,
+				stdio: "pipe",
+				env: { ...process.env, CAD_SPIKE: "1" },
+			});
+			expect(existsSync(new URL(".spike-dist/spike/stage0/index.html", root))).toBe(true);
+		} finally {
+			rmSync(new URL(".spike-dist", root), { recursive: true, force: true });
+		}
 	}, 120_000);
 
 	it("keeps the kernel worker URL out of the hashed assets", () => {

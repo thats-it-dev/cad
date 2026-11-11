@@ -50,8 +50,8 @@ test("the real kernel builds a solid and measures the box it built", async ({ pa
 	const bench = r.deviations[String(0.1)].build;
 	expect(bench.buildId, "a rebuild must carry a new build id").not.toBe(r.box.buildId);
 	expect(bench.probeKey).toBe(`${bench.buildId}|${bench.stepId}|volume`);
-	// The kernel resets its cache counters at the start of every evaluate (CascadeWorker.js:161-164) and prints
-	// the tally at the end of the same one, so each build carries its own evidence that nothing was memoised.
+	// The shipped worker zeroes its cache counters at the start of every evaluate and prints the tally at the end
+	// of the same one (public/kernel/cascade-worker.js:16), so each build carries its own evidence that nothing was memoised.
 	const hitsRe = /Cache: (\d+) hits/;
 	for (const [line, label] of [
 		[bench.cacheLine, "the 20-step rebuild"],

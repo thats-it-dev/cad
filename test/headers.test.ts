@@ -12,21 +12,29 @@ describe("parseHeaders", () => {
 
 describe("public/_headers", () => {
 	const h = parseHeaders(readFileSync(new URL("../public/_headers", import.meta.url), "utf8"))["/*"];
-	const csp = h["Content-Security-Policy"];
+	const csp = Object.fromEntries(
+		h["Content-Security-Policy"].split(";").map((part) => part.trim().split(/\s+/)).filter((p) => p[0] !== "").map(([d, ...s]) => [d, s]),
+	) as Record<string, string[]>;
+	// The whole allow list, one entry per directive, so neither a wider source nor a new directive passes.
+	const allowed: Record<string, string[]> = {
+		"default-src": ["'self'"],
+		"script-src": ["'self'", "'unsafe-eval'", "'wasm-unsafe-eval'", "https://kit.thatsit.app"],
+		"style-src": ["'self'", "'unsafe-inline'", "https://kit.thatsit.app"],
+		"font-src": ["https://kit.thatsit.app"],
+		"img-src": ["'self'", "data:", "blob:"],
+		"connect-src": ["'self'", "blob:", "https://kit.thatsit.app"],
+		"manifest-src": ["'self'"],
+		"worker-src": ["'self'", "blob:"],
+		"base-uri": ["'none'"],
+		"form-action": ["'none'"],
+	};
 
-	it.each([
-		"default-src 'self'",
-		"script-src 'self' https://kit.thatsit.app",
-		"style-src 'self' 'unsafe-inline' https://kit.thatsit.app",
-		"font-src https://kit.thatsit.app",
-		"img-src 'self' data: blob:",
-		"connect-src 'self' https://kit.thatsit.app",
-		"manifest-src 'self'",
-		"worker-src 'self'",
-		"base-uri 'none'",
-		"form-action 'none'",
-	])("CSP contains %s", (part) => {
-		expect(csp).toContain(part);
+	it.each(Object.entries(allowed))("CSP %s allows exactly %j", (directive, sources) => {
+		expect(csp[directive], directive).toEqual(sources);
+	});
+
+	it("names no directive beyond those", () => {
+		expect(Object.keys(csp).sort()).toEqual(Object.keys(allowed).sort());
 	});
 
 	it("caches hashed assets for a year", () => {
@@ -46,7 +54,7 @@ describe("gateway CSP", () => {
 	const cfg = { name: "a", title: "A", description: "d", color: "#FFAA00" };
 
 	it("adds the default gateway origin when gateway is true", () => {
-		expect(connect(gatewayHeaders(text, { ...cfg, gateway: true }, undefined))).toBe("'self' https://kit.thatsit.app https://spark-713a.tail9274fa.ts.net:9443");
+		expect(connect(gatewayHeaders(text, { ...cfg, gateway: true }, undefined))).toBe("'self' blob: https://kit.thatsit.app https://spark-713a.tail9274fa.ts.net:9443");
 	});
 	it("uses the origin of GATEWAY_URL", () => {
 		expect(connect(gatewayHeaders(text, { ...cfg, gateway: true }, "https://spark-713a.tail9274fa.ts.net:9512/"))).toContain(" https://spark-713a.tail9274fa.ts.net:9512");

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { beforeAll, describe, expect, it } from "vitest";
 import { loadConfig } from "../vite/config.ts";
 
@@ -32,6 +32,34 @@ describe("vite build", () => {
 			expect(js).not.toContain("lit-html");
 			expect(js).not.toContain("LitElement.prototype");
 		}
+	});
+
+	it("keeps the stage 0 spike out of the deploy build, and in when it is asked for", () => {
+		// beforeAll built with no CAD_SPIKE, which is what the deploy job runs (deploy.yml:85).
+		expect(existsSync(new URL("dist/spike", root)), "a reachable bench page on cad.thatsit.app").toBe(false);
+		// The flag has to actually work, or the iPad row of stage0.md is unmeasurable: the fix for the finding
+		// above must not become a new silent failure. try/finally so a failed assertion does not leave a second
+		// build tree in the working copy.
+		try {
+			execFileSync("npx", ["vite", "build", "--outDir", ".spike-dist", "--emptyOutDir"], {
+				cwd: root,
+				stdio: "pipe",
+				env: { ...process.env, CAD_SPIKE: "1" },
+			});
+			expect(existsSync(new URL(".spike-dist/spike/stage0/index.html", root))).toBe(true);
+		} finally {
+			rmSync(new URL(".spike-dist", root), { recursive: true, force: true });
+		}
+	}, 120_000);
+
+	it("keeps the kernel worker URL out of the hashed assets", () => {
+		// A plain string in src/main.ts, so Vite never rewrites it and never emits a second worker copy
+		// under /assets/ (which the service worker would precache). Quote style is the minifier's choice.
+		const files = readdirSync(new URL("dist/assets/", root));
+		expect(files.filter((f) => f.includes("cascade"))).toEqual([]);
+		const js = files.filter((f) => f.endsWith(".js")).map((f) => dist(`assets/${f}`));
+		expect(js.some((s) => s.includes("/kernel/cascade-worker.js"))).toBe(true);
+		expect(dist("sw.js")).not.toContain("kernel");
 	});
 
 	it("fills in the service worker", () => {

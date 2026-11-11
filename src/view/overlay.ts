@@ -31,8 +31,11 @@ export function createOverlay(canvas: HTMLCanvasElement): Overlay {
 
 	const size = (width: number, height: number): void => {
 		const ratio = Math.min(globalThis.devicePixelRatio ?? 1, 2);
-		canvas.width = Math.max(1, Math.round(width * ratio));
-		canvas.height = Math.max(1, Math.round(height * ratio));
+		// floor, not round, to match three.js' `setSize`: it writes canvas.height = floor(height * ratio).
+		// With a fractional CSS height (a toolbar leaving 760.71875 px) rounding put the two layers one device
+		// row apart, and the e2e that proves "ink cannot drift off the model" failed on the backing store.
+		canvas.width = Math.max(1, Math.floor(width * ratio));
+		canvas.height = Math.max(1, Math.floor(height * ratio));
 		// Re-read on every layout change: a theme flip that changes the page's text colour shows up here
 		// without the viewer having to be rebuilt.
 		readColour();

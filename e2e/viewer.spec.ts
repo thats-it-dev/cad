@@ -18,10 +18,13 @@ const CAMERA = `(${V}.__CAD_VIEWER__).camera`;
 /** One canvas's box in CSS px plus its backing-store size. A string body, because a Playwright callback is
  *  compiled against Node's globals and `window` is not one of them. */
 const geometryOf = (cls: string) =>
-	`(() => { const c = ${CANVAS(cls)}; const b = c.getBoundingClientRect(); return { w: Math.round(b.width), h: Math.round(b.height), px: c.width, py: c.height }; })()`;
+	`(() => { const c = ${CANVAS(cls)}; const b = c.getBoundingClientRect(); return { x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.width), h: Math.round(b.height), px: c.width, py: c.height }; })()`;
 
-/** Painted pixels on the ink layer. 2D readback is exact, where a WebGL buffer may already be swapped. */
-const inkPixels = `(() => { const c = ${CANVAS("ink")}; const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data; let painted = 0; for (let i = 3; i < d.length; i += 4) if (d[i] > 0) painted++; return painted; })()`;
+/** Painted pixels on the ink layer, and how many of them differ from the first pixel. An untouched 2D canvas
+ *  reads back as fully transparent black, and a canvas that has never been drawn into at all reads as uniform
+ *  — so the raw painted count was 1280 samples of "nothing has been drawn here", never zero. The non-uniform
+ *  count is the honest signal: 0 while the layer is blank, whatever its size, and positive once ink is on it. */
+const inkPixels = `(() => { const c = ${CANVAS("ink")}; const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data; let painted = 0, different = 0; for (let i = 3; i < d.length; i += 4) { if (d[i] > 0) painted++; if (d[i] !== d[3]) different++; } return { painted, different }; })()`;
 
 /** Asks the worker on the same envelope KernelClient uses, and decodes the reply here in Node.
  *  There is no client import: this runs against a built page, where a raw /src/*.ts URL is not fetchable. */
@@ -78,11 +81,14 @@ test("<cad-viewer> fills the page with two aligned canvases", async ({ page }) =
 	await rendered(page);
 	expect(await page.evaluate(`(() => ${V}.__CAD_VIEWER__ != null)()`), "the viewer is mounted").toBe(true);
 
-	const model = (await page.evaluate(geometryOf("model"))) as { w: number; h: number; px: number; py: number };
+	const model = (await page.evaluate(geometryOf("model"))) as { x: number; y: number; w: number; h: number; px: number; py: number };
 	const ink = (await page.evaluate(geometryOf("ink"))) as typeof model;
-	expect(model.w, "the model canvas spans the viewport").toBeGreaterThanOrEqual(300);
+	expect(model.w, "the model canvas spans the working area").toBeGreaterThanOrEqual(300);
 	expect(model.h).toBeGreaterThanOrEqual(300);
 	expect(ink, "the ink layer is the same box, so ink cannot drift off the model").toEqual(model);
+	// The bar row took the top of the page in Task 9, so the canvas is no longer at (0, 0). What still has to
+	// hold — and what the ink's coordinate space depends on — is that the two canvases share one box.
+	expect([model.x, model.y], "that box is inside the viewport, wherever the toolbar left it").toEqual([0, expect.any(Number)]);
 });
 
 test("both canvases refuse the browser's own gestures", async ({ page }) => {
@@ -129,7 +135,8 @@ test("a mesh from the stub kernel reaches a canvas that is not blank", async ({ 
 test("the pen's stroke lands on the ink layer, and reports its phases", async ({ page }) => {
 	await page.goto("/?kernel=fake");
 	await rendered(page);
-	const before = (await page.evaluate(inkPixels)) as number;
+	const before = (await page.evaluate(inkPixels)) as { painted: number; different: number };
+	expect(before.different, "the ink layer starts blank").toBe(0);
 	const down = await page.evaluate(`(() => {
 		const c = ${CANVAS("model")};
 		const seen = [];
@@ -140,15 +147,31 @@ test("the pen's stroke lands on the ink layer, and reports its phases", async ({
 		fire("pointerdown", ...ring[0]);
 		for (const p of ring.slice(1)) fire("pointermove", ...p);
 		return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve({ seen, painted: ${inkPixels} }))));
-	})()`);
+	})()`) as { seen: string[]; painted: { painted: number; different: number } };
 	expect(down.seen.slice(0, 5), "a pen stroke starts and moves, and says what drew it").toEqual(["start:pen", "move:pen", "move:pen", "move:pen", "move:pen"]);
-	expect(down.painted, "ink is drawn on the 2D layer while the stroke is live").toBeGreaterThan(before);
+	expect(down.painted.different, "ink is drawn on the 2D layer while the stroke is live").toBeGreaterThan(0);
 	const after = await page.evaluate(`(() => {
 		const c = ${CANVAS("model")};
 		c.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 7, pointerType: "pen", isPrimary: true, clientX: 40, clientY: 40 }));
-		return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(${inkPixels}))));
-	})()`);
-	expect(after, "the live stroke is transient ink: it clears when the pen lifts, and what remains is entities").toBe(before);
+		return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve({ painted: ${inkPixels}, ink: ${V}.__CAD_VIEWER__.ink.length }))));
+	})()`) as { painted: { painted: number; different: number }; ink: number };
+	// What remains after the lift is not the stroke: it is the entity the app committed from it, drawn through
+	// the frame. Task 9 put an app behind this page and that app closes a ring on pen-up, so the pixels
+	// legitimately stay — an earlier version of this test asserted they vanished, which was true of a bare
+	// viewer and is false of a working one. "Not accumulated" is proved by the count: two strokes, two
+	// entities, and the layer repainted from scratch each frame (`overlay.clear()` before every draw).
+	expect(after.ink, "and what remains is the entities the tool committed").toBe(1);
+	const second = await page.evaluate(`(() => {
+		const c = ${CANVAS("model")};
+		const fire = (type, x, y) => c.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId: 8, pointerType: "pen", isPrimary: true, clientX: x, clientY: y }));
+		const ring = [[240, 240], [340, 250], [350, 340], [240, 240]];
+		fire("pointerdown", ...ring[0]);
+		for (const p of ring.slice(1)) fire("pointermove", ...p);
+		fire("pointerup", ...ring[ring.length - 1]);
+		return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve({ ink: ${V}.__CAD_VIEWER__.ink.length, painted: ${inkPixels} }))));
+	})()`) as { ink: number; painted: { painted: number; different: number } };
+	expect(second.ink, "a second stroke adds one entity, it does not append to the first").toBe(2);
+	expect(second.painted.different, "the layer is repainted, not accumulated").toBeGreaterThan(0);
 });
 
 test("a mouse drag orbits, and release snaps only when the camera is near an axis", async ({ page }) => {

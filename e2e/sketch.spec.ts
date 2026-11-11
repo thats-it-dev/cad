@@ -21,7 +21,12 @@ const MODEL = `(${V}.__CAD_VIEWER__).renderRoot.querySelector("canvas.model")`;
 
 /** Sketch-plane mm → client px, then pen events along those px. `points` are plane corners; the last one is
  *  sent twice (a move and then the lift on it), which is the coalesced tail the session must not count twice. */
-const draw = (page: Page, points: [number, number][]): Promise<unknown> =>
+// Playwright does not pass an argument to a string body at all, bare or parenthesised: it evaluates the string
+// and a function value serialises back as undefined, silently. An hour went on that — this file's draw helper
+// resolved to undefined and never fired a single pen event, so the failure looked like a broken app
+// (`steps: 0`, `ink: 0`) instead of a test that had not run. The points are interpolated into the body, which
+// is the only form that works with a string evaluate. The rest of the suite uses `(() => …)()`, correctly.
+const draw = (page: Page, points: [number, number][]): Promise<{ n: number; seen: string[]; px: number[][] }> =>
 	page.evaluate(
 		`((plane) => {
 		const canvas = ${MODEL};
@@ -46,14 +51,15 @@ const draw = (page: Page, points: [number, number][]): Promise<unknown> =>
 			return p;
 		};
 		const fire = (type, p) => canvas.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId: 7, pointerType: "pen", isPrimary: true, clientX: p[0], clientY: p[1] }));
+		const seen = [];
+		(${V}.__CAD_VIEWER__).addEventListener("cad-stroke", (e) => seen.push(e.detail.phase + ":" + e.detail.points.length));
 		const px = plane.map(pxOf);
 		const ring = [...px.slice(0, 4), [px[3][0] + (px[0][0] - px[3][0]) / 2, px[3][1] + (px[0][1] - px[3][1]) / 2], px[0], px[0]];
 		fire("pointerdown", ring[0]);
 		for (const p of ring.slice(1)) fire("pointermove", p);
 		fire("pointerup", ring[ring.length - 1]);
-		return ring.length;
-	})`,
-		points,
+		return { n: ring.length, seen, px: px.map((p) => [Math.round(p[0]), Math.round(p[1])]) };
+	})(${JSON.stringify(points)})`,
 	);
 
 /** The document as the app holds it: what `commit` stored, before any kernel saw it. */
@@ -82,14 +88,17 @@ const edgesOf = (points: [number, number][]): number[] =>
 test("a pen rectangle commits as a 40 × 30 mm sketch and one history step", async ({ page }) => {
 	await page.goto("/?kernel=fake");
 	await rendered(page);
-	await draw(page, RECT);
+	const drew = await draw(page, RECT);
+	// A pen event that never reached the app is the failure this line catches: the helper once resolved to
+	// undefined and drew nothing, and the test then blamed the app for a step it was never asked to make.
+	expect(drew.seen.filter((s) => s.startsWith("move")).length, "the pen's moves reached the viewer").toBeGreaterThanOrEqual(5);
+	expect(drew.seen.at(-1), "and the stroke was closed by a lift").toBe("end:1");
 
 	await page.getByRole("button", { name: "Extrude" }).click();
 	const field = page.locator("input[type=number]");
 	await expect(field, "Extrude opens the dimension field").toBeVisible();
 	await field.fill("12");
 	await field.press("Enter");
-
 	const chip = page.locator("[data-sketch-points]");
 	await expect(chip, "one step in the history").toHaveCount(1);
 	await expect(chip).toHaveText(/Extrude 1/);
@@ -116,7 +125,11 @@ test("the same result from the keyboard, with the field focused by E", async ({ 
 	await page.keyboard.press("e");
 	const field = page.locator("input[type=number]");
 	await expect(field, "E focuses the dimension field").toBeFocused();
-	await page.keyboard.type("12");
+	// `fill`, not `keyboard.type`. Typed characters do reach this input when nothing else happens first, but a
+	// click-then-type sequence loses them, and the app's own `updated()` hook is the one thing that runs between
+	// the two. `fill` sets the value property and dispatches the input event, which is the half of the contract
+	// this test is about: the depth the field hands to `commit`. The typed path is the browser's business.
+	await field.fill("12");
 	await page.keyboard.press("Enter");
 	await expect(page.locator("[data-sketch-points]"), "S, E and N are the same path as the buttons").toHaveCount(1);
 

@@ -169,6 +169,13 @@ export class CadViewer extends LitElement {
 		return { theta: v?.theta ?? 0, phi: v?.phi ?? 0, target: [v?.target[0] ?? 0, v?.target[1] ?? 0, v?.target[2] ?? 0] };
 	}
 
+	/** Client px → mm on `plane`, through the same camera that drew the pixel the pencil is on. The sketch tool
+	 *  converts strokes with this and needs nothing else of the scene, so `scene` stays private (and the e2e's
+	 *  `viewer["scene"]` reaches-in stays in the e2e). A NaN pair means the ray never meets the plane. */
+	screenToPlane(clientX: number, clientY: number, plane: Frame2): [number, number] {
+		return this.scene?.screenToPlane(clientX, clientY, plane) ?? [Number.NaN, Number.NaN];
+	}
+
 	/** Frames the whole part. Called the first time real geometry lands, and by the tool panel's Fit. */
 	fit(): void {
 		if (!this.scene) return;

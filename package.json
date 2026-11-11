@@ -18,6 +18,7 @@
 		"test": "vitest run",
 		"e2e": "playwright test",
 		"icons": "node scripts/make-icons.ts",
+		"get-kernel": "node scripts/get-kernel.ts",
 		"e2e:one": "playwright test --project=desktop",
 		"lint": "knip --no-progress",
 		"guardrails": "vitest run test/guardrails.test.ts && npm run lint",

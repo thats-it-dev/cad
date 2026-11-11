@@ -34,6 +34,16 @@ describe("vite build", () => {
 		}
 	});
 
+	it("keeps the kernel worker URL out of the hashed assets", () => {
+		// A plain string in src/main.ts, so Vite never rewrites it and never emits a second worker copy
+		// under /assets/ (which the service worker would precache). Quote style is the minifier's choice.
+		const files = readdirSync(new URL("dist/assets/", root));
+		expect(files.filter((f) => f.includes("cascade"))).toEqual([]);
+		const js = files.filter((f) => f.endsWith(".js")).map((f) => dist(`assets/${f}`));
+		expect(js.some((s) => s.includes("/kernel/cascade-worker.js"))).toBe(true);
+		expect(dist("sw.js")).not.toContain("kernel");
+	});
+
 	it("fills in the service worker", () => {
 		const sw = dist("sw.js");
 		expect(sw).not.toContain("__PRECACHE__");

@@ -53,6 +53,19 @@ function chain(): { doc: CadDocument; base: string; cut: string; pad: string } {
 	return { doc: c.doc, base: a.id, cut: b.id, pad: c.id };
 }
 
+/** Hand-written rows, for histories insertExtrude cannot produce (a parent later in the list). */
+type Extrude = Extract<Step, { kind: "extrude" }>;
+const onAxis = (id: string): Extrude => ({
+	id,
+	kind: "extrude",
+	name: "Extrude",
+	sketch: sketch(axisXY(), rect(1_000, 1_000)),
+	depth: 1_000,
+	cut: false,
+});
+const onFace = (id: string, parent: string): Extrude => ({ ...onAxis(id), sketch: sketch(faceOn(parent), rect(1_000, 1_000)) });
+const flux = (id: string): Step => ({ id, kind: "unknown", type: "flux" });
+
 describe("newDocument", () => {
 	it("starts empty with schema 1", () => {
 		expect(newDocument("housing")).toEqual({ schema: 1, name: "housing", steps: [] });
@@ -153,11 +166,14 @@ describe("removeStep", () => {
 		expect(ids(removeStep(doc, cut))).toEqual([base, pad]);
 	});
 	it("keeps a step drawn on a removed face and marks it broken", () => {
-		const { doc, base, cut } = chain();
+		const { doc, base, cut, pad } = chain();
 		const gone = removeStep(doc, base);
 		expect(stepById(gone, cut)).toBeDefined();
 		expect(extrude(gone, cut).sketch.plane).toEqual(faceOn(base));
-		expect(brokenSteps(gone)).toEqual([{ id: cut, reason: "parent removed" }]);
+		expect(brokenSteps(gone)).toEqual([
+			{ id: cut, reason: "parent removed" },
+			{ id: pad, reason: "parent removed" }, // drawn on a face of cut, which no longer builds
+		]);
 	});
 	it("removing twice removes nothing more", () => {
 		const { doc, base } = chain();
@@ -174,24 +190,39 @@ describe("brokenSteps", () => {
 		expect(brokenSteps(doc)).toEqual([{ id: "s1", reason: "unknown kind", type: "flux" }]);
 	});
 	it("lists every problem once, in document order", () => {
-		const { doc, base, cut } = chain();
-		const mixed: CadDocument = {
-			...removeStep(doc, base),
-			steps: [{ id: "old", kind: "unknown", type: "loft" }, ...removeStep(doc, base).steps],
-		};
+		const { doc, base, cut, pad } = chain();
+		const without = removeStep(doc, base);
+		const mixed: CadDocument = { ...without, steps: [{ id: "old", kind: "unknown", type: "loft" }, ...without.steps] };
 		expect(brokenSteps(mixed)).toEqual([
 			{ id: "old", reason: "unknown kind", type: "loft" },
 			{ id: cut, reason: "parent removed" },
+			{ id: pad, reason: "parent removed" }, // pad's parent draws on cut, so it cannot build either
 		]);
 		expect(brokenSteps(doc).length).toBe(0);
 		expect(extrude(doc, cut).sketch.plane).toEqual(faceOn(base));
+	});
+	it("marks a step whose parent is present but broken, at any distance", () => {
+		const demoted: Step = { id: "old", kind: "unknown", type: "extrude" };
+		const doc: CadDocument = { schema: 1, name: "x", steps: [flux("s1"), demoted, onFace("s2", "s1"), onFace("s3", "s2"), onFace("s4", "old")] };
+		expect(brokenSteps(doc)).toEqual([
+			{ id: "s1", reason: "unknown kind", type: "flux" },
+			{ id: "old", reason: "unknown kind", type: "extrude" },
+			{ id: "s2", reason: "parent removed" },
+			{ id: "s3", reason: "parent removed" },
+			{ id: "s4", reason: "parent removed" },
+		]);
+	});
+	it("marks a step whose parent sits later in the history", () => {
+		// The script builder walks the steps in document order, so s2 would name an operation not yet built.
+		const doc: CadDocument = { schema: 1, name: "x", steps: [onFace("s2", "s3"), onAxis("s3")] };
+		expect(brokenSteps(doc)).toEqual([{ id: "s2", reason: "parent removed" }]);
 	});
 });
 
 describe("normalize", () => {
 	it("carries an unknown step from a later version, and everything it held", () => {
 		const { doc, problems } = normalize({ schema: 1, steps: [{ id: "s1", kind: "flux", watts: 5 }] });
-		expect(problems).toEqual(["step s1: unknown kind flux"]);
+		expect(problems).toEqual(["document: missing name", "step s1: unknown kind flux"]);
 		expect(doc.steps[0]).toMatchObject({ id: "s1", kind: "unknown", type: "flux" });
 		expect(serialize(doc)).toContain('"watts":5');
 	});
@@ -222,6 +253,24 @@ describe("normalize", () => {
 		expect(doc.steps[0].id).toBe("step-00000000-0000-4000-8000-000000000001");
 		expect(problems).toEqual(["step 0: missing id"]);
 	});
+	it("names a document whose name it cannot use", () => {
+		for (const name of [undefined, 7, ""]) {
+			const { doc, problems } = normalize({ schema: 1, name, steps: [] });
+			expect(doc.name, String(name)).toBe("Untitled");
+			expect(problems, String(name)).toEqual(["document: missing name"]);
+		}
+	});
+	it("re-mints a second step claiming an id already in the history", () => {
+		const fresh = "step-00000000-0000-4000-8000-000000000001";
+		const { doc, problems } = normalize({ schema: 1, name: "x", steps: [flux("s1"), flux("s1")] });
+		expect(problems).toEqual(["step s1: duplicate id"]);
+		expect(doc.steps[1].id).toBe(fresh);
+		expect(brokenSteps(doc)).toEqual([
+			{ id: "s1", reason: "unknown kind", type: "flux" },
+			{ id: fresh, reason: "unknown kind", type: "flux" },
+		]);
+		expect(removeStep(doc, "s1").steps.length).toBe(1);
+	});
 	it("flags a schema it cannot read and a steps list that is not one", () => {
 		expect(normalize({ schema: 2, name: "x", steps: [] }).problems).toEqual(["document: schema 2 is not 1"]);
 		expect(normalize({ schema: 1, name: "x" }).problems).toEqual(["document: steps is not an array"]);
@@ -234,6 +283,10 @@ describe("normalize", () => {
 			{ ...extrude(doc, base), sketch: { ...extrude(doc, base).sketch, entities: [{ kind: "arc" }] } },
 			{ ...extrude(doc, base), sketch: { ...extrude(doc, base).sketch, plane: { kind: "axis", axis: "YX", offset: 0 } } },
 			{ ...extrude(doc, base), sketch: 7 },
+			{ ...extrude(doc, base), depth: 0 },
+			{ ...extrude(doc, base), depth: 1e21 },
+			{ ...extrude(doc, base), sketch: { ...extrude(doc, base).sketch, entities: [{ kind: "circle", centre: [0, 0], radius: -5_000 }] } },
+			{ ...extrude(doc, base), sketch: { ...extrude(doc, base).sketch, entities: [{ kind: "circle", centre: [0, 0], radius: 0 }] } },
 		];
 		for (const step of bad) {
 			const fixed = normalize({ ...doc, steps: [step] });

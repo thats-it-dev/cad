@@ -4,14 +4,18 @@ import type { Umm } from "./units.ts";
 /** Counted while a document is repaired, so a rounded distance can be reported rather than hidden. */
 type Repair = { rounded: number };
 
+/** A document's placeholder title, so one that lost its name never reads as blank in a list. */
+const UNTITLED = "Untitled";
+
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isAxis = (v: unknown): v is "XY" | "XZ" | "YZ" => v === "XY" || v === "XZ" || v === "YZ";
 const isRole = (v: unknown): v is "face" | "edge" => v === "face" || v === "edge";
 
-/** A distance in µm. Anything finite is accepted and rounded to a whole µm. */
+/** A distance in µm: rounded to a whole µm, and dropped when the document cannot hold that number. */
 const dist = (v: unknown, repair: Repair): number | null => {
 	if (typeof v !== "number" || !Number.isFinite(v)) return null;
 	const r = Math.round(v);
+	if (!Number.isSafeInteger(r)) return null;
 	if (r !== v) repair.rounded += 1;
 	return r;
 };
@@ -38,7 +42,7 @@ export function newId(prefix: string): string {
 	return `${prefix}-${crypto.randomUUID()}`;
 }
 
-export function newDocument(name = "Untitled"): CadDocument {
+export function newDocument(name = UNTITLED): CadDocument {
 	return { schema: 1, name, steps: [] };
 }
 
@@ -75,18 +79,30 @@ export function removeStep(doc: CadDocument, id: string): CadDocument {
 	return { ...doc, steps: doc.steps.filter((s) => s.id !== id) };
 }
 
-/** Why a step cannot build, as a short machine-readable reason plus the offending kind. */
+/**
+ * Why a step cannot build, as a short machine-readable reason plus the offending kind. A step is broken
+ * when its parent is gone, later in the history than it is, or broken itself: the script builder walks the
+ * steps in document order, so anything that does not resolve to an earlier healthy operation cannot build.
+ */
 export function brokenSteps(doc: CadDocument): { id: string; reason: "unknown kind" | "parent removed"; type?: string }[] {
 	const found: { id: string; reason: "unknown kind" | "parent removed"; type?: string }[] = [];
-	for (const step of doc.steps) {
+	const row = new Map(doc.steps.map((s, i) => [s.id, i]));
+	const broken = new Set<string>();
+	doc.steps.forEach((step, i) => {
 		if (step.kind === "unknown") {
+			broken.add(step.id);
 			found.push({ id: step.id, reason: "unknown kind", type: step.type });
-			continue;
+			return;
 		}
-		if (step.sketch.plane.kind === "face" && !stepById(doc, step.sketch.plane.face.step)) {
+		const plane = step.sketch.plane;
+		if (plane.kind !== "face") return;
+		const parent = plane.face.step;
+		const at = row.get(parent);
+		if (at === undefined || at >= i || broken.has(parent)) {
+			broken.add(step.id);
 			found.push({ id: step.id, reason: "parent removed" });
 		}
-	}
+	});
 	return found;
 }
 
@@ -106,14 +122,21 @@ export function normalize(json: unknown): { doc: CadDocument; problems: string[]
 	}
 	if (!isObject(value)) return { doc: newDocument(), problems: ["document: not an object"] };
 	if (value.schema !== 1) problems.push(`document: schema ${String(value.schema)} is not 1`);
+	let name: string;
+	if (typeof value.name === "string" && value.name !== "") {
+		name = value.name;
+	} else {
+		problems.push("document: missing name");
+		name = UNTITLED;
+	}
 	const list = Array.isArray(value.steps) ? value.steps : null;
 	if (!list) problems.push("document: steps is not an array");
-	const steps = (list ?? []).map((entry, i) => normalizeStep(entry, i, problems));
-	const name = typeof value.name === "string" ? value.name : "";
+	const seen = new Set<string>();
+	const steps = (list ?? []).map((entry, i) => normalizeStep(entry, i, problems, seen));
 	return { doc: { schema: 1, name, steps }, problems };
 }
 
-function normalizeStep(entry: unknown, index: number, problems: string[]): Step {
+function normalizeStep(entry: unknown, index: number, problems: string[], seen: Set<string>): Step {
 	if (!isObject(entry)) {
 		problems.push(`step ${index}: not an object`);
 		return { id: newId("step"), kind: "unknown", type: "invalid" };
@@ -125,6 +148,12 @@ function normalizeStep(entry: unknown, index: number, problems: string[]): Step 
 		problems.push(`step ${index}: missing id`);
 		id = newId("step");
 	}
+	// Two rows sharing an id cannot be told apart by removeStep or replaceStep, so the second becomes its own step.
+	if (seen.has(id)) {
+		problems.push(`step ${id}: duplicate id`);
+		id = newId("step");
+	}
+	seen.add(id);
 	if (entry.kind === "extrude") return normalizeExtrude(entry, id, problems);
 	if (entry.kind === "unknown") {
 		return { ...entry, id, kind: "unknown", type: typeof entry.type === "string" ? entry.type : "unknown" };
@@ -140,7 +169,8 @@ function normalizeExtrude(raw: Record<string, unknown>, id: string, problems: st
 	const sketch = normalizeSketch(raw.sketch, repair);
 	const depth = dist(raw.depth, repair);
 	const cut = typeof raw.cut === "boolean" ? raw.cut : null;
-	if (!sketch || depth === null || cut === null) {
+	// A zero-depth extrude builds no solid, so it reads as a broken step instead of an empty one.
+	if (!sketch || depth === null || depth === 0 || cut === null) {
 		problems.push(`step ${id}: invalid extrude step`);
 		return { ...raw, id, kind: "unknown", type: "extrude" };
 	}
@@ -199,7 +229,8 @@ function normalizeEntity(raw: unknown, repair: Repair): Entity | null {
 	if (raw.kind === "circle") {
 		const centre = pair(raw.centre, repair);
 		const radius = dist(raw.radius, repair);
-		return centre && radius !== null ? { ...raw, kind: "circle", centre, radius } : null;
+		// A circle that encloses nothing has no face to extrude.
+		return centre && radius !== null && radius > 0 ? { ...raw, kind: "circle", centre, radius } : null;
 	}
 	return null;
 }

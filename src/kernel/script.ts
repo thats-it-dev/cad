@@ -39,11 +39,13 @@ export function buildScript(doc: CadDocument, opts: { probes: Probe[]; buildId: 
 		lines.push(...built.lines);
 		opsPerStep[step.id] = built.lines.filter(isOp).length;
 		shapeOf.set(step.id, built.shape);
-		lastShape = { stepId: step.id, shape: built.shape };
-		// Only a step that actually built owns the body. A later cut from a step that did not build references that
-		// step's null variable and yields nothing, which is honest; falling back to an earlier solid would quietly
-		// re-apply the cut to the wrong shape.
-		if (built.lines.some(isOp)) body = built.shape;
+		// Both body and lastShape follow the last step that BUILT, not the last step in the history: a
+		// face-anchored or unknown-kind step has no solid, and letting it own the tail would make the probe
+		// tail measure a null variable while the renderer still shows the real solid.
+		if (built.lines.some(isOp)) {
+			body = built.shape;
+			lastShape = { stepId: step.id, shape: built.shape };
+		}
 	}
 
 	for (const probe of opts.probes) {
@@ -65,9 +67,9 @@ function buildExtrude(step: Extrude, names: Names, body: string | null): Built {
 		const wire = `p${++names.p}`;
 		lines.push(`const ${wire} = Polygon(${ring(entity, sketch, frame)}, true);`);
 		const face = `f${++names.f}`;
-		lines.push(`const ${face} = MakeFace(${wire}, true);`);
+		lines.push(`const ${face} = MakeFace(${wire}, false);`);
 		const solid = `s${++names.s}`;
-		lines.push(`const ${solid} = Extrude(${face}, ${direction}, true);`);
+		lines.push(`const ${solid} = Extrude(${face}, ${direction}, false);`);
 		solids.push(solid);
 	}
 
@@ -83,7 +85,14 @@ function buildExtrude(step: Extrude, names: Names, body: string | null): Built {
 
 	if (step.cut) {
 		const cut = `s${++names.s}`;
-		lines.push(`const ${cut} = Difference(${body ?? "null"}, [${shape}], [false, false], ${FUZZ}, false);`);
+		if (!body) {
+			// Difference guards a null main body only with a log line, then hands it to BooleanCut, and a throw
+			// inside the eval'd script surfaces as an uncaught worker error, not a failed build. No body means no
+			// boolean call.
+			lines.push(`const ${cut} = null; // nothing to cut from`);
+			return { lines, shape: cut };
+		}
+		lines.push(`const ${cut} = Difference(${body}, [${shape}], [false, false], ${FUZZ}, false);`);
 		return { lines, shape: cut };
 	}
 	if (!body) return { lines, shape };

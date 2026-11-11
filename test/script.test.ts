@@ -52,8 +52,8 @@ describe("script builder: geometry reaches the kernel as points", () => {
 		const { doc, ids } = docWith({ sketch: axisSketch(XY), depth: 12_000 });
 		const s = buildScript(doc, { probes: [], buildId: "b1" });
 		expect(s.code).toContain("Polygon([");
-		expect(s.code).toContain("MakeFace(p1, true)");
-		expect(s.code).toContain("Extrude(f1, [0,0,12], true)");
+		expect(s.code).toContain("MakeFace(p1, false)");
+		expect(s.code).toContain("Extrude(f1, [0,0,12], false)");
 		expect(s.code).not.toContain("Sketch(");
 		expect(s.opsPerStep[ids[0]]).toBe(3);
 	});
@@ -71,7 +71,7 @@ describe("script builder: geometry reaches the kernel as points", () => {
 		});
 		const s = buildScript(doc, { probes: [], buildId: "b1" });
 		expect(s.code).toContain("Polygon([[0,5,0],[40,5,0],[40,5,30],[0,5,30]], true)");
-		expect(s.code).toContain("Extrude(f1, [0,-12,0], true)");
+		expect(s.code).toContain("Extrude(f1, [0,-12,0], false)");
 	});
 
 	it("cuts with a Difference that consumes the body and the tool", () => {
@@ -151,7 +151,7 @@ describe("script builder: millimetre boundary", () => {
 		expect(s.code).toContain("[40,0,0]");
 		expect(s.code).toContain("[40,0.012,0]");
 		expect(s.code).toContain("[0,0.012,0]");
-		expect(s.code).toContain("Extrude(f1, [0,0,12], true)");
+		expect(s.code).toContain("Extrude(f1, [0,0,12], false)");
 	});
 
 	it("prints no number with more than six decimals or a trailing zero", () => {
@@ -194,7 +194,26 @@ describe("script builder: probes tail", () => {
 	});
 });
 
-describe("script builder: steps that cannot build", () => {
+	it("keeps only solids in the scene, so face_index stays unique", () => {
+			// MakeFace and Extrude remove their input when the keep flag is falsy; leaving the profile wire and
+			// the face in sceneShapes would compound them alongside the solid, and combineAndRenderShapes
+			// restarts face_index numbering per scene shape — a duplicate coplanar face on every sketch plane.
+			const { doc } = docWith({ sketch: axisSketch(XY), depth: 12_000 });
+			const s = buildScript(doc, { probes: [], buildId: "b1" });
+			expect(s.code).toContain("MakeFace(p1, false)");
+			expect(s.code).toContain("Extrude(f1, [0,0,12], false)");
+		});
+
+		it("emits no boolean call when a cut has nothing to cut from", () => {
+			const { doc } = insertExtrude(newDocument("t"), null, axisSketch(XY, rect(5_000, 5_000)), 12_000, true);
+			const s = buildScript(doc, { probes: [], buildId: "b1" });
+			expect(s.code).not.toContain("Difference(");
+			expect(s.code).toContain("= null; // nothing to cut from");
+			expect(opLines(s.code)).toHaveLength(3);
+			expect(s.opsPerStep[doc.steps[0].id]).toBe(3);
+		});
+
+		describe("script builder: steps that cannot build", () => {
 	it("threads a face-anchored step as null and emits no op for it", () => {
 		const base = insertExtrude(newDocument("t"), null, axisSketch(XY), 12_000, false);
 		const added = insertExtrude(

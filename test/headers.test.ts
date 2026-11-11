@@ -16,13 +16,13 @@ describe("public/_headers", () => {
 
 	it.each([
 		"default-src 'self'",
-		"script-src 'self' https://kit.thatsit.app",
+		"script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' https://kit.thatsit.app",
 		"style-src 'self' 'unsafe-inline' https://kit.thatsit.app",
 		"font-src https://kit.thatsit.app",
 		"img-src 'self' data: blob:",
-		"connect-src 'self' https://kit.thatsit.app",
+		"connect-src 'self' blob: https://kit.thatsit.app",
 		"manifest-src 'self'",
-		"worker-src 'self'",
+		"worker-src 'self' blob:",
 		"base-uri 'none'",
 		"form-action 'none'",
 	])("CSP contains %s", (part) => {
@@ -46,7 +46,7 @@ describe("gateway CSP", () => {
 	const cfg = { name: "a", title: "A", description: "d", color: "#FFAA00" };
 
 	it("adds the default gateway origin when gateway is true", () => {
-		expect(connect(gatewayHeaders(text, { ...cfg, gateway: true }, undefined))).toBe("'self' https://kit.thatsit.app https://spark-713a.tail9274fa.ts.net:9443");
+		expect(connect(gatewayHeaders(text, { ...cfg, gateway: true }, undefined))).toBe("'self' blob: https://kit.thatsit.app https://spark-713a.tail9274fa.ts.net:9443");
 	});
 	it("uses the origin of GATEWAY_URL", () => {
 		expect(connect(gatewayHeaders(text, { ...cfg, gateway: true }, "https://spark-713a.tail9274fa.ts.net:9512/"))).toContain(" https://spark-713a.tail9274fa.ts.net:9512");

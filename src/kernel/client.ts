@@ -61,6 +61,11 @@ const PROBE_PREAMBLE =
 	`const __console0 = console.error; console.error = (...a) => { self.postMessage({ type: "log", payload: "${ERROR_PREFIX}" + a.map((x) => (x && x.message ? x.message : String(x))).join(" ") }); return __console0.apply(console, a); };
 `;
 
+/** An ErrorEvent is a browser global; it is absent on Node < 26, which is what CI runs. Everything the app
+ *  reads off one is `message`, so the fallback is honest rather than decorative. */
+export const workerError = (message: string): ErrorEvent =>
+	typeof ErrorEvent === "function" ? new ErrorEvent("error", { message }) : ({ message, type: "error" } as ErrorEvent);
+
 /** What the worker is doing right now: probes land on the log stream, not on a reply. */
 type Live = { buildId: string; probes: Record<string, number>; error: string | null; event: ErrorEvent | null };
 
@@ -221,7 +226,7 @@ export class KernelClient {
 		if (error !== null && (!shrugged || mesh.faceCount === 0)) {
 			// The app learns about failures exactly once, whether the kernel reported through the patched
 			// console.error or the worker actually threw.
-			this.opts.onError(live?.event ?? new ErrorEvent("error", { message: error }));
+			this.opts.onError(live?.event ?? workerError(error));
 			// The mesh from a build that failed is never the one to show: a partial scene is what tricked the
 			// kernel into complaining in the first place.
 			return this.failed(buildId, error);

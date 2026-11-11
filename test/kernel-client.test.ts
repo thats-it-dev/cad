@@ -1,7 +1,7 @@
 // The kernel client's protocol, tested against a stub worker rather than the 21 MB wasm bundle: what gets
 // posted, what comes back, and what the client does when the worker stops talking or talks back with an error.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { KernelClient, type BuildResult } from "../src/kernel/client.ts";
+import { KernelClient, workerError, type BuildResult } from "../src/kernel/client.ts";
 import { EMPTY_MESH } from "../src/kernel/decode.ts";
 import type { CadDocument, Entity, Step } from "../src/model/types.ts";
 
@@ -45,7 +45,7 @@ class StubWorker {
 
 	/** Surfaces a worker-side throw, which is the only way an `onerror` handler is ever reached. */
 	fireError(message: string): void {
-		this.onerror?.(new ErrorEvent("error", { message }));
+		this.onerror?.(workerError(message));
 	}
 
 	/** Answers a `request()`, echoing its requestId, as the worker's message wrapper does. */

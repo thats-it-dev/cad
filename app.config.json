@@ -1,6 +1,6 @@
 {
-	"name": "app-template",
-	"title": "App template",
-	"description": "Starter for small thatsit.app PWAs",
+	"name": "cad",
+	"title": "cad",
+	"description": "Sketch and extrude parts on the iPad, export STEP",
 	"color": "#FFAA00"
 }

@@ -73,7 +73,8 @@ function pointer(target: EventTarget, init: PointerInit): void {
 const down = (t: EventTarget, id: number, kind: string, x: number, y: number) => pointer(t, { id, type: "pointerdown", kind, x, y });
 const move = (t: EventTarget, id: number, kind: string, x: number, y: number, burst?: { x: number; y: number; t: number }[]) =>
 	pointer(t, { id, type: "pointermove", kind, x, y, burst });
-const up = (t: EventTarget, id: number, kind: string, x: number, y: number) => pointer(t, { id, type: "pointerup", kind, x, y });
+const up = (t: EventTarget, id: number, kind: string, x: number, y: number, burst?: { x: number; y: number; t: number }[]) =>
+	pointer(t, { id, type: "pointerup", kind, x, y, burst });
 
 const drawn = (calls: Call[]) => calls.filter((c) => c.kind === "draw");
 const lastDraw = (calls: Call[]) => drawn(calls)[drawn(calls).length - 1];
@@ -176,6 +177,20 @@ describe("gestures", () => {
 		gestures.dispose();
 	});
 
+	it("carries the coalesced tail of the lift too, not just the last one", () => {
+		const { calls, target, gestures } = rig();
+		down(target, 1, "pen", 0, 0);
+		move(target, 1, "pen", 10, 0, [{ x: 10, y: 0, t: 1 }]);
+		// A fast lift arrives as one event with the last frames folded into it: dropping them shortens the
+		// ring the tool is about to close by whatever the pen moved in the final frame.
+		const tail = [{ x: 14, y: 2, t: 2 }, { x: 18, y: 4, t: 3 }];
+		up(target, 1, "pen", 18, 4, tail);
+		const end = drawn(calls).at(-1)!;
+		expect(end.args[0]).toBe("end");
+		expect(end.args[1]).toEqual(tail);
+		gestures.dispose();
+	});
+
 	it("falls back to the event's own point when coalescing is missing or empty", () => {
 		const { calls, target, gestures } = rig();
 		down(target, 1, "pen", 0, 0);
@@ -218,13 +233,15 @@ describe("gestures", () => {
 		gestures.dispose();
 	});
 
-	it("detaches its listeners on dispose, so a stroke in flight cannot reach a handler", () => {
+	it("detaches its listeners on dispose, and closes a stroke that was still open", () => {
 		const { calls, target, gestures } = rig();
 		down(target, 1, "pen", 0, 0);
 		gestures.dispose();
 		move(target, 1, "pen", 40, 40);
 		up(target, 1, "pen", 40, 40);
-		expect(drawn(calls).map((c) => c.args[0])).toEqual(["start"]);
+		// Nothing after the teardown reaches the tool, but the stroke it had already opened is reported as
+		// finished: a ring left open by a viewer that went away mid-drawing would never close.
+		expect(drawn(calls).map((c) => c.args[0])).toEqual(["start", "end"]);
 	});
 });
 

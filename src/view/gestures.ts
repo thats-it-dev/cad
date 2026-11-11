@@ -53,6 +53,9 @@ export class Gestures {
 	dispose(): void {
 		for (const [type, fn] of this.bound) this.target.removeEventListener(type, fn);
 		this.bound.length = 0;
+		// A tool that opened a ring on "start" must be told it ended, or the ring stays open forever when the
+		// viewer is torn down mid-stroke (a re-mount, a tool switch, a page going away).
+		for (const [, held] of this.live) if (held.pen) this.handlers.draw("end", [{ x: held.x, y: held.y, t: 0 }], "pen");
 		this.live.clear();
 	}
 
@@ -110,7 +113,7 @@ export class Gestures {
 		const held = this.live.get(e.pointerId);
 		if (!held) return;
 		this.live.delete(e.pointerId);
-		if (held.pen) this.handlers.draw("end", [point(e)], e.pointerType);
+		if (held.pen) this.handlers.draw("end", inkOf(e), e.pointerType);
 	}
 
 	private wheel(e: WheelEvent): void {

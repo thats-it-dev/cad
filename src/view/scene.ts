@@ -189,12 +189,12 @@ export function createScene(canvas: HTMLCanvasElement, overlay?: Overlay): Scene
 		},
 		pan(dx, dy) {
 			const mmPerPx = visibleHeight() / height;
-			move(dx * -mmPerPx, dy * mmPerPx);
+			move(dx * mmPerPx, dy * mmPerPx);
 		},
 		zoom(factor, centre) {
 			const mmPerPx = visibleHeight() / height;
 			// Keep the point under the fingers or the cursor where it was, then dolly.
-			move((centre.x - width / 2) * mmPerPx * (1 - 1 / factor), (height / 2 - centre.y) * mmPerPx * (1 - 1 / factor));
+			move((centre.x - width / 2) * mmPerPx * (1 - 1 / factor), (centre.y - height / 2) * mmPerPx * (1 - 1 / factor));
 			view.distance = Math.min(Math.max(view.distance / factor, NEAR_LIMIT), FAR_LIMIT);
 		},
 		snap() {
@@ -209,11 +209,16 @@ export function createScene(canvas: HTMLCanvasElement, overlay?: Overlay): Scene
 		return 2 * view.distance * Math.tan(((FOV / 2) * Math.PI) / 180);
 	}
 
-	/** Shifts the target along the screen's own axes, in mm. */
+	/** Shifts the target along the screen's own axes, in mm. `right` is screen-right, `up` screen-up. */
 	function move(right: number, up: number): void {
+		// toward = target → eye. Screen-right is up × (target→eye) crossed the other way round: with camera.up
+		// = +Z and azimuth θ the eye sits at (sin θ cos φ, …, cos θ cos φ) from the target, so the horizontal
+		// unit the pan has to follow is (-sin θ, cos θ, 0) = (target→eye) × up … and screen-up is the negative
+		// of up × that, because up × right points *down* the screen for a Z-up camera. Both signs were got
+		// wrong once, which made a two-finger drag push the model against the fingers.
 		toward.copy(direction(view)).negate();
-		sideways.crossVectors(camera.up, toward).normalize();
-		toward.crossVectors(toward, sideways).normalize();
+		sideways.crossVectors(camera.up, toward).normalize().negate();
+		toward.crossVectors(sideways, camera.up).normalize();
 		view.target = [
 			view.target[0] + sideways.x * right + toward.x * up,
 			view.target[1] + sideways.y * right + toward.y * up,
@@ -230,7 +235,10 @@ export function createScene(canvas: HTMLCanvasElement, overlay?: Overlay): Scene
 			geometry.setIndex(new THREE.BufferAttribute(mesh.indices, 1));
 			// A face the kernel tessellated without normals would shade black; flat ones cost one pass and
 			// never leave a hole in the model.
-			if (mesh.normals.length !== mesh.positions.length || mesh.normals.every((n) => n === 0)) geometry.computeVertexNormals();
+			// A face the kernel tessellated without normals would shade black, so recompute if any normal is
+			// blank — decode zeroes only the faces whose normal_coord was the wrong length (src/kernel/decode.ts),
+			// so an all-or-nothing test here would leave exactly the hole it promises to close.
+			if (mesh.normals.length !== mesh.positions.length || mesh.normals.some((n) => n === 0)) geometry.computeVertexNormals();
 			geometry.computeBoundingSphere();
 			edgeGeometry.setAttribute("position", new THREE.BufferAttribute(mesh.edgePositions, 3));
 			edgeGeometry.setIndex(new THREE.BufferAttribute(new Uint32Array(edgePairs(mesh)), 1));
@@ -256,10 +264,12 @@ export function createScene(canvas: HTMLCanvasElement, overlay?: Overlay): Scene
 		ray.setFromCamera(device(clientX, clientY), camera);
 	}
 
+	/** A model point → px in the canvas's own space, which is what the overlay draws into. The overlay canvas
+	 *  sits exactly over this one, so local px is one coordinate system for both; `device()` above and the
+	 *  gestures' `clientX` are the client-space pair. */
 	function projectTo(p: Vec3): Pixel {
 		centre.set(p[0], p[1], p[2]).project(camera);
-		const rect = canvas.getBoundingClientRect();
-		return { x: rect.left + ((centre.x + 1) / 2) * rect.width, y: rect.top + ((1 - centre.y) / 2) * rect.height };
+		return { x: ((centre.x + 1) / 2) * width, y: ((1 - centre.y) / 2) * height };
 	}
 
 	/** Sketch entities in plane mm → screen px, through the frame they were drawn in. */

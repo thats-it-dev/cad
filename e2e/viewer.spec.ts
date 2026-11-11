@@ -182,3 +182,69 @@ test("a mouse drag orbits, and release snaps only when the camera is near an axi
 	expect(Math.abs(big.after.theta - big.during.theta), "a far release leaves the camera where it was put").toBeLessThan(1e-9);
 	expect(nearAxis(big.after.theta), "and it really is off-axis").toBe(false);
 });
+
+test("two fingers pan the model with them, not against them", async ({ page }) => {
+	await page.goto("/?kernel=fake");
+	await rendered(page);
+	const before = (await page.evaluate(CAMERA)) as { target: [number, number, number] };
+	// A real two-finger drag needs two live pointers; Playwright's touch emulator drives one, so the pair is
+	// dispatched. The geometry is the part under test: screen-right is a vector the scene computes, and the
+	// scene cannot be unit tested in Node, where there is no WebGL and no canvas.
+	await page.evaluate(`(() => {
+		const c = ${CANVAS("model")};
+		const fire = (type, id, x, y) => c.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId: id, pointerType: "touch", isPrimary: id === 1, clientX: x, clientY: y }));
+		fire("pointerdown", 1, 200, 300);
+		fire("pointerdown", 2, 200, 500);
+		fire("pointermove", 1, 300, 300);
+		fire("pointermove", 2, 300, 500);
+		fire("pointerup", 1, 300, 300);
+		fire("pointerup", 2, 300, 500);
+		return true;
+	})()`);
+	const after = (await page.evaluate(CAMERA)) as { target: [number, number, number]; theta: number };
+	const dx = after.target[0] - before.target[0];
+	const dy = after.target[1] - before.target[1];
+	expect(Math.hypot(dx, dy), "a 100 px two-finger drag moves the target off centre").toBeGreaterThan(1);
+	// Which way "with the fingers" is, computed rather than pasted: screen-right in world space is the
+	// horizontal unit perpendicular to the view azimuth, (-sin θ, cos θ, 0), for any φ. A drag to the right
+	// must move the camera's target along it — the model appears to ride with the fingers.
+	const right = [-Math.sin(after.theta), Math.cos(after.theta)];
+	const along = dx * right[0]! + dy * right[1]!;
+	expect(along, "the target moves screen-right when the fingers drag screen-right").toBeGreaterThan(1);
+});
+
+test("a pen lift does not move the camera", async ({ page }) => {
+	await page.goto("/?kernel=fake");
+	await rendered(page);
+	// Park the view 3° off an axis, inside the 6° snap window, so a snap that has no business running is
+	// unmistakable: it would rotate the model the moment the pen leaves the glass.
+	await page.evaluate(`(() => { const s = ${V}.__CAD_VIEWER__["scene"]; s.view.orbit(3 * Math.PI / 180 / (Math.PI / 2 / 300), 0); return true; })()`);
+	const before = (await page.evaluate(CAMERA)) as { theta: number; phi: number };
+	await page.evaluate(`(() => {
+		const c = ${CANVAS("model")};
+		const fire = (type, x, y) => c.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId: 7, pointerType: "pen", isPrimary: true, clientX: x, clientY: y }));
+		fire("pointerdown", 100, 100);
+		fire("pointermove", 160, 120);
+		fire("pointermove", 200, 180);
+		fire("pointerup", 200, 180);
+		return true;
+	})()`);
+	const after = (await page.evaluate(CAMERA)) as { theta: number; phi: number };
+	expect(after, "drawing a stroke leaves the camera exactly where it was").toEqual(before);
+});
+
+test("a wheel zoom keeps the point under the cursor where it was", async ({ page }) => {
+	await page.goto("/?kernel=fake");
+	await rendered(page);
+	// The anchor is the test: dolly in about (500, 300) and the mm of the model under (500, 300) must not
+	// change. Sign errors in the pan axes passed unnoticed for exactly this long because nothing measured it.
+	const drift = (await page.evaluate(`(() => {
+		const s = ${V}.__CAD_VIEWER__["scene"];
+		const plane = { normal: [0, 0, 1], origin: [0, 0, 0], u: [1, 0, 0], v: [0, 1, 0] };
+		const before = s.screenToPlane(500, 300, plane);
+		s.view.zoom(1.4, { x: 500, y: 300 });
+		const after = s.screenToPlane(500, 300, plane);
+		return Math.hypot(before[0] - after[0], before[1] - after[1]);
+	})()`)) as number;
+	expect(drift, "zooming 1.4× about a point slides it by less than a tenth of a mm").toBeLessThan(0.1);
+});

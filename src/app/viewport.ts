@@ -64,9 +64,13 @@ export class CadViewer extends LitElement {
 	private overlay: Overlay | null = null;
 	private gestures: Gestures | null = null;
 	private observer: ResizeObserver | null = null;
-	/** The pen stroke currently on the canvas, in CSS px. It is not ink: ink is what a stroke became. */
-	private stroke: Pixel[] = [];
+	/** Whether a whole part has ever been framed. Set only by fit(), so an orbit before the first build lands
+	 *  cannot make the part arrive unframed (review P2). */
 	private fitted = false;
+	/** Whether the camera moved since the last fit. */
+	private touched = false;
+	/** The pen stroke currently on the canvas, in the ink canvas's own px. It is not ink: ink is what a stroke became. */
+	private stroke: Pixel[] = [];
 	private frameRequested = false;
 
 	protected render() {
@@ -74,6 +78,13 @@ export class CadViewer extends LitElement {
 	}
 
 	protected firstUpdated(): void {
+		this.start();
+	}
+
+	/** Wire up the canvases. Called once from firstUpdated, and again after a re-connect, because disposing on
+	 *  disconnect and never re-creating left both canvases blank for the rest of the page's life. */
+	private start(): void {
+		if (this.scene) return;
 		const canvases = this.renderRoot.querySelectorAll("canvas");
 		const model = canvases[0] as HTMLCanvasElement;
 		const ink = canvases[1] as HTMLCanvasElement;
@@ -87,7 +98,8 @@ export class CadViewer extends LitElement {
 			draw: (phase, points, pointerType) => this.strokePhase(phase, points, pointerType),
 		});
 		// Snap on release: the gesture map reports movement, not the end of a camera gesture, so the
-		// pull-to-axis happens on the pointerup the map already consumed.
+		// pull-to-axis happens on the pointerup the map already consumed. The pen's pointerup is not a camera
+		// gesture — snapping there would rotate the view under a sketch stroke mid-drawing.
 		model.addEventListener("pointerup", this.snapped);
 		model.addEventListener("pointercancel", this.snapped);
 		this.observer = new ResizeObserver((entries) => {
@@ -118,7 +130,8 @@ export class CadViewer extends LitElement {
 		this.invalidate();
 	}
 
-	private readonly snapped = (): void => {
+	private readonly snapped = (event: Event): void => {
+		if ((event as PointerEvent).pointerType === "pen") return;
 		this.view((v) => v.snap());
 	};
 
@@ -126,13 +139,17 @@ export class CadViewer extends LitElement {
 	private view(then: (view: NonNullable<Scene["view"]>) => void): void {
 		if (!this.scene) return;
 		then(this.scene.view);
-		this.fitted = true;
+		this.touched = true;
 		this.invalidate();
 	}
 
+	/** Live ink in the overlay's own px: the gestures report client coordinates, the canvas is positioned
+	 *  wherever the host put it, and a thumbnail off (0,0) would otherwise draw its ink offset. */
 	private strokePhase(phase: "start" | "move" | "end", points: InkPoint[], pointerType: string): void {
-		if (phase === "start") this.stroke = points.map((p) => ({ x: p.x, y: p.y }));
-		else if (phase === "move") this.stroke = this.stroke.concat(points.map((p) => ({ x: p.x, y: p.y })));
+		const rect = (this.renderRoot.querySelector("canvas.ink") as HTMLCanvasElement | null)?.getBoundingClientRect();
+		const local = points.map((p) => ({ x: p.x - (rect?.left ?? 0), y: p.y - (rect?.top ?? 0) }));
+		if (phase === "start") this.stroke = local;
+		else if (phase === "move") this.stroke = this.stroke.concat(local);
 		else this.stroke = [];
 		// The viewer draws the stroke; what it *means* (a sketch, a selection, a drag handle) is the active
 		// tool's business, and Task 9 is the first to listen.
@@ -147,8 +164,9 @@ export class CadViewer extends LitElement {
 
 	/** The orbit, for the tool panel's axis buttons (Task 10) and for the e2e that has to prove a drag moved
 	 *  the camera. A copy: the camera belongs to the scene, and nothing outside it should steer it. */
-	get camera(): { theta: number; phi: number } {
-		return { theta: this.scene?.view.theta ?? 0, phi: this.scene?.view.phi ?? 0 };
+	get camera(): { theta: number; phi: number; target: [number, number, number] } {
+		const v = this.scene?.view;
+		return { theta: v?.theta ?? 0, phi: v?.phi ?? 0, target: [v?.target[0] ?? 0, v?.target[1] ?? 0, v?.target[2] ?? 0] };
 	}
 
 	/** Frames the whole part. Called the first time real geometry lands, and by the tool panel's Fit. */
@@ -156,6 +174,7 @@ export class CadViewer extends LitElement {
 		if (!this.scene) return;
 		this.scene.fit(meshBounds(this.mesh));
 		this.fitted = true;
+		this.touched = false;
 		this.invalidate();
 	}
 
@@ -171,7 +190,9 @@ export class CadViewer extends LitElement {
 	private draw(): void {
 		if (!this.scene || !this.overlay) return;
 		// A part that has never been framed gets framed, or the first thing the user sees is empty canvas.
-		if (!this.fitted && this.mesh.faceCount > 0) this.fit();
+		// "Never been framed" means fit() has not run, not that the camera has not moved: a flick before the
+		// first build landed must still frame the part when it arrives.
+		if ((!this.fitted || (this.touched && this.mesh.faceCount > 0)) && this.mesh.faceCount > 0) this.fit();
 		this.scene.render(this.mesh, this.ink);
 		if (this.stroke.length > 1) this.overlay.polylines([this.stroke]);
 	}

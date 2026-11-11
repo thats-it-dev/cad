@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { frameFor, frameFromNormal, project, unproject, type Vec3 } from "../src/sketch/frame.ts";
-import { areaOf, CORNER_EPSILON_UM, isClosed, snapSegment, toEntities, type Map2, type RawStroke } from "../src/sketch/entities.ts";
+import { areaOf, isClosed, snapSegment, toEntities, type Map2, type RawStroke } from "../src/sketch/entities.ts";
 import type { Entity, PlaneRef } from "../src/model/types.ts";
 import type { Umm } from "../src/model/units.ts";
 
@@ -197,8 +197,49 @@ describe("strokes to entities", () => {
 		]);
 	});
 
+	it("keeps a shallow corner when the pencil is sampled twice as densely", () => {
+		const points: Px[] = [];
+		for (let i = 0; i <= 80; i++) {
+			const x = i * 2.5;
+			points.push([x, x <= 100 ? x * 0.25 : (200 - x) * 0.25]);
+		}
+		expect(poly(draw(points)), "the apex turn is fixed; only the spacing grew").toEqual([
+			[0, 0],
+			[5_000, 1_000],
+			[10_000, 0],
+		]);
+	});
+
+	it("keeps a 45° chamfer, but places its corners at the sampled vertices", () => {
+		// 4 mm flat, a 2 × 2 mm chamfer, 4 mm flat, sampled every 4 px. Without the 20.1° angle cap the
+		// density threshold here is atan2(94/234) = 21.9° for a finer sample and climbs past 68° at 0.05 mm
+		// spacing, and the chamfer is eaten whole. With it, both ends survive — at the vertex just past each
+		// bend, not the line intersection. Pinning that is v1.0's known imprecision, not a hidden one.
+		const points: Px[] = [];
+		for (let i = 0; i <= 40; i++) {
+			const x = i * 4;
+			const y = x >= 120 ? 20 : x >= 80 ? x - 80 : 0;
+			points.push([x, y]);
+		}
+		expect(poly(draw(points)), "chamfer kept, corners at the sample points").toEqual([
+			[0, 0],
+			[4000, 0],
+			[6000, 2000],
+			[6000, 1000],
+			[8000, 1000],
+		]);
+	});
+
+	it("drops a degenerate closed ring instead of emitting [A,B,A]", () => {
+		const line: Px[] = [
+			[0, 0],
+			[400, 0],
+		];
+		expect(poly(draw(line)), "an open 2-point stroke is a valid polyline").toHaveLength(2);
+		expect(toEntities([{ points: line }], { map: MAP, snapUmm: 1_000, closed: true }), "closed needs a real polygon").toEqual([]);
+	});
+
 	it("collapses wobble along a 40 mm stroke", () => {
-		expect(CORNER_EPSILON_UM, "the floor, for a stroke too small for 1% to mean anything").toBe(25);
 		expect(poly(draw(legs(0)))).toHaveLength(2);
 	});
 

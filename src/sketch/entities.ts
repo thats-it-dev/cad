@@ -10,12 +10,17 @@ export type RawStroke = { points: [number, number][] };
 export type Map2 = { originPx: [number, number]; mmPerPx: number };
 
 /** The floor for dropping a vertex that sits on the line between its neighbours. Wobble is judged against
- *  1% of the stroke's own extent (see `cornerTolUmm`), never against the snap grid: rounding must not decide
+ *  1% of the stroke's own arc length (see `cornerTolUmm`), never against the snap grid: rounding must not decide
  *  whether a corner exists. This floor only bites on a stroke too small for 1% to mean anything. */
 export const CORNER_EPSILON_UM: Umm = 25;
 
 /** A segment within 5° of an axis is taken as exactly horizontal or vertical. A real chamfer is 30°+. */
 const AXIS_TAN = 0.0875;
+
+/** Hard ceiling on the turn that counts as wobble, in radians (20°). The density-aware threshold below
+ *  rises as sampling gets finer — a slow stroke on iPad samples every ~0.2 mm — and past this angle a
+ *  corner is geometry whatever the spacing. Corners shallower than ~20° are flattened: v1.0's trade. */
+const MAX_TURN = 0.35;
 
 type Point = [Umm, Umm];
 
@@ -57,7 +62,7 @@ export function toEntities(strokes: RawStroke[], opts: { map: Map2; snapUmm: Umm
 			points.push(snapped);
 		}
 		const ring = merge(points);
-		if (ring.length < 2) continue;
+		if (ring.length < (closed ? 3 : 2)) continue;
 		if (closed) ring.push([ring[0][0], ring[0][1]]);
 		entities.push({ kind: "poly", points: ring });
 	}
@@ -76,12 +81,14 @@ function merge(points: Point[]): Point[] {
  *  of its neighbours and still be a corner. */
 function simplify(points: Point[]): Point[] {
 	if (points.length < 3) return points;
-	const cuts = corners(points, Math.atan2(cornerTolUmm(points), meanSegmentUmm(points)));
+	const cuts = cornerCuts(points, Math.min(Math.atan2(cornerTolUmm(points), meanSegmentUmm(points)), MAX_TURN));
 	return points.filter((_, i) => i === 0 || i === points.length - 1 || cuts.has(i));
 }
 
-/** Vertices where the path turns by more than `maxTurn` radians. */
-function corners(points: Point[], maxTurn: number): Set<number> {
+/** Vertices where the path turns by more than `maxTurn` radians. Two turns on neighbouring vertices are
+ *  indistinguishable from a tiny tab (a 0.5 mm feature at pencil sample spacing): both are kept, because
+ *  no local rule can tell a deliberate step from sampling drift. What is pinned is the angle floor below. */
+function cornerCuts(points: Point[], maxTurn: number): Set<number> {
 	const segs = points.slice(1).map((p, i): Point => [p[0] - points[i][0], p[1] - points[i][1]]);
 	const cuts = new Set<number>();
 	for (let i = 1; i < segs.length; i++) {
@@ -98,13 +105,13 @@ const meanSegmentUmm = (points: Point[]): number => {
 	return total / (points.length - 1) || 1;
 };
 
-/** 1% of the stroke's bounding-box diagonal: a hand wobbles the same fraction on a 5 mm tab as on a 500 mm
- *  plate, so an absolute threshold would either flatten the small one or shred the large one. */
+/** 1% of the stroke's arc length, floored: a hand wobbles the same fraction per mm travelled on a 5 mm tab
+ *  as on a 500 mm plate. The bounding-box diagonal is the wrong measure — a long, thin stroke (a shallow step
+ *  along a 40 mm edge) reports a big diagonal and its real corners get flattened. */
 function cornerTolUmm(points: Point[]): Umm {
-	const xs = points.map((p) => p[0]);
-	const ys = points.map((p) => p[1]);
-	const extent = Math.hypot(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
-	return Math.max(CORNER_EPSILON_UM, Math.round(extent * 0.01));
+	let length = 0;
+	for (let i = 1; i < points.length; i++) length += Math.hypot(points[i][0] - points[i - 1][0], points[i][1] - points[i - 1][1]);
+	return Math.max(CORNER_EPSILON_UM, Math.round(length * 0.01));
 }
 
 /** Enclosed area in mm². An open poly encloses nothing and reports 0. */

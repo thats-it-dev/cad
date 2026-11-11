@@ -80,7 +80,7 @@ const answering =
 	(w, msg) => {
 		if (msg.type === "Evaluate") {
 			for (const p of probeCalls(msg.payload.code)) {
-				if (p.expr.trim() !== "null") w.fire({ type: "log", payload: `__PROBE__${p.buildId}|${p.stepId}|${p.kind}|${READING[p.kind]}` });
+				if (p.expr.trim() !== "null") w.fire({ type: "log", payload: `__PROBE__${p.buildId}|${p.stepId}|${p.kind}|${READING[p.kind]}` }); // as the patched __b posts it, not via console.log
 			}
 			w.fire({ type: "log", payload: `evaluated ${probeCalls(msg.payload.code).length} probe(s)` });
 		}
@@ -94,16 +94,26 @@ const answering =
 /** An `Evaluate` that never gets a mesh back, i.e. a hung kernel. */
 const silent: Behaviour = () => {};
 
-/** A worker error that lands the way the real one does: rethrown on a task after the meshing reply. */
+/** A worker error that lands the way the real one does: reported from inside evaluate, and the worker's own
+ *  rethrow arriving afterwards as an onerror we must not double-count. */
 const errorAfterReply =
 	(message: string, faces: unknown[] = []): Behaviour =>
 	(w, msg) => {
-		if (msg.type !== "combineAndRenderShapes") return;
-		setTimeout(() => w.fireError(message), 0);
-		w.answer(msg, combineReply(faces));
+		if (msg.type === "Evaluate") {
+			w.fire({ type: "log", payload: `__ERROR__${message}` });
+			setTimeout(() => w.fireError(message), 0);
+		}
+		if (msg.type === "combineAndRenderShapes") w.answer(msg, combineReply(faces));
 	};
 
-/** Every `__b(...)` call in a script, i.e. the probes this build asked for. */
+/** The way a kernel error reaches us now: reported from inside evaluate, ahead of the synchronous mesh reply,
+ *  because the client patches console.error (see PROBE_PREAMBLE) instead of waiting for the worker's rethrow. */
+const errorTwoHopsAfterReply =
+	(message: string): Behaviour =>
+	(w, msg) => {
+		if (msg.type === "Evaluate") w.fire({ type: "log", payload: `__ERROR__${message}` });
+		if (msg.type === "combineAndRenderShapes") w.answer(msg, combineReply([face(0, 0), face(1, 0)]));
+	};
 const probeCalls = (code: string) =>
 	[...code.matchAll(/__b\("([^"]*)", ?"([^"]*)", ?"([^"]*)", ?([^)]*)\)/g)].map((m) => ({ buildId: m[1], stepId: m[2], kind: m[3], expr: m[4] }));
 
@@ -207,7 +217,29 @@ describe("KernelClient: a build", () => {
 		expect(good(await client.build(doc(pad("s1")))).mesh).not.toBe(EMPTY_MESH);
 	});
 
-	it("does not fail a build over a step this version cannot build", async () => {
+	it("still calls a late kernel error a failure, reported during evaluate", async () => {
+			// The worker's own console.error rethrows from a setTimeout, which can land after the mesh reply and be
+			// read as success. The client patches console.error to report synchronously instead, so the ordering is
+			// settled by the kernel's message queue rather than by a timer nobody on this side can outwait.
+			const { client } = client_(answering());
+			const first = good(await client.build(doc(pad("s1"))));
+			StubWorker.behaviour = errorTwoHopsAfterReply("INTERNAL OPENCASCADE ERROR DURING GENERATE: boolean failed");
+			const second = bad(await client.build(doc(pad("s1"), pad("s2"))));
+			expect(second.error).toContain("boolean failed");
+			expect(second.mesh, "the canvas keeps what it had").toBe(first.mesh);
+		});
+
+		it("refuses a preview against a failed build's history", async () => {
+			// evaluate wipes modelHistory even when it fails, so yesterday's step index now points at nothing, or
+			// worse at another step's geometry. preview() must say so rather than draw a lie.
+			const { client } = client_(answering());
+			await good(await client.build(doc(pad("s1"))));
+			StubWorker.behaviour = errorTwoHopsAfterReply("INTERNAL OPENCASCADE ERROR DURING GENERATE: boolean failed");
+			await bad(await client.build(doc(pad("s1"), pad("s2"))));
+			await expect(client.preview("s1", 2)).rejects.toThrow("not in the last good build");
+		});
+
+		it("does not fail a build over a step this version cannot build", async () => {
 		const { client, errors } = client_(
 			errorAfterReply("INTERNAL OPENCASCADE ERROR DURING GENERATE: Null Shape detected in sceneShapes; skipping: null", [face(0, 0)]),
 		);

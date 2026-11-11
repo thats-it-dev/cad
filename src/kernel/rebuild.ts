@@ -48,8 +48,11 @@ export class Rebuilder {
 			try {
 				result = await this.kernel.build(doc);
 			} catch (e) {
-				for (const w of [...waiting, ...this.waiters.splice(0)]) w.reject(e);
-				break;
+				// Only the waiters whose document was being built are rejected. Anyone who asked during the failure
+				// is still queued, and `pending` still holds their document, so the loop keeps going: abandoning it
+				// here would leave the newest document unbuilt until somebody happened to ask again.
+				for (const w of waiting) w.reject(e);
+				continue;
 			}
 			for (const w of waiting) w.resolve(result);
 		}

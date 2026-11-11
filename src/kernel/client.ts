@@ -24,6 +24,10 @@ export type KernelOptions = {
 	/** Same-origin URL, never a bundled hash: the worker is a module worker. Task 9 passes window.__CAD_KERNEL__. */
 	workerUrl: string;
 	onError: (e: ErrorEvent) => void;
+	/** A worker error the app has not already been told about: the kernel throwing between builds, or its own
+ *  one-task-late rethrow of a fault settle() reported synchronously. Optional so a caller that only cares
+ *  about failed builds is not forced to de-duplicate them. */
+	onCrash?: (e: ErrorEvent) => void;
 	onLog?: (line: string) => void;
 	/** How long the worker may take to answer one call before it is replaced. */
 	toolTimeoutMs?: number;
@@ -43,17 +47,23 @@ type CombineReply = [[RawFace[], RawEdge[]], Record<string, unknown>] | null | u
 /** A shape the kernel skipped, which is expected while a face-anchored step exists (Task 12). Not a failure. */
 const SKIPPED_SHAPE = /Null Shape detected in sceneShapes|Non-Shape detected in sceneShapes/i;
 const PROBE_PREFIX = "__PROBE__";
-const PROBE_LINE = /^__PROBE__([^|]+)\|([^|]+)\|([^|]+)\|(-?[\d.e+]+)$/;
+const PROBE_LINE = /^__PROBE__([^|]+)\|([^|]+)\|([^|]+)\|(-?[\d.eE+-]+)$/;
+const ERROR_PREFIX = "__ERROR__";
 
-/** `buildScript` emits `try { __b(buildId, stepId, kind, value) } catch {}` lines and never defines `__b`, so
- *  the definition is threaded in here. Its `try` means a host without it cannot fail the build either. */
+/** Both channels post directly rather than through console: the worker's own overrides (CascadeWorker.js:46-62)
+ *  put console.log behind a setTimeout and turn console.error into a throw from a setTimeout, which is how a
+ *  failure ends up arriving AFTER the mesh reply and being read as success. A synchronous postMessage from a
+ *  call made during evaluate lands before any of that, and the reply to combineAndRenderShapes is itself
+ *  posted synchronously from the same turn, so ordering is: geometry, its errors and probes, then the settle. */
 const PROBE_PREAMBLE =
-	`const __b = (buildId, stepId, kind, value) => console.log("${PROBE_PREFIX}" + buildId + "|" + stepId + "|" + kind + "|" + value);\n`;
+	`const __b = (buildId, stepId, kind, value) => self.postMessage({ type: "log", payload: "${PROBE_PREFIX}" + buildId + "|" + stepId + "|" + kind + "|" + value });
+` +
+	`const __console0 = console.error; console.error = (...a) => { self.postMessage({ type: "log", payload: "${ERROR_PREFIX}" + a.map((x) => (x && x.message ? x.message : String(x))).join(" ") }); return __console0.apply(console, a); };
+`;
 
 /** What the worker is doing right now: probes land on the log stream, not on a reply. */
 type Live = { buildId: string; probes: Record<string, number>; error: string | null; event: ErrorEvent | null };
 
-const nextTask = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
 export class KernelClient {
 	private readonly opts: KernelOptions;
@@ -97,9 +107,9 @@ export class KernelClient {
 				{ maxDeviation: this.deviation, sceneOptions: {} },
 				this.timeout,
 			);
-			// The kernel rethrows its own console.error one task late (CascadeWorker's console override), so
-			// the reply can arrive before the failure it belongs to.
-			await nextTask();
+			// Nothing more to wait for: the errors and probes of this build were posted during evaluate, before
+			// the synchronous reply we are now holding. An onerror that still arrives later belongs to a build the
+			// caller has already been told about, and settle() has run by then.
 			return this.settle(buildId, decodeMesh(reply ? { faces: reply[0][0], edges: reply[0][1] } : null), script.opsPerStep);
 		} catch (e) {
 			// A worker that answered nothing cannot be trusted to answer the next build either.
@@ -169,8 +179,14 @@ export class KernelClient {
 
 	private readLog(payload: unknown): void {
 		for (const line of String(payload).split("\n")) {
-			if (!line.startsWith(PROBE_PREFIX)) {
+			if (!line.startsWith(PROBE_PREFIX) && !line.startsWith(ERROR_PREFIX)) {
 				this.opts.onLog?.(line);
+				continue;
+			}
+			if (line.startsWith(ERROR_PREFIX)) {
+				// The kernel's own console.error, reported as it happens rather than rethrown one task late. First
+				// error wins; a line arriving after settle() belongs to a build already reported and is dropped.
+				if (this.live && this.live.error === null) this.live.error = line.slice(ERROR_PREFIX.length);
 				continue;
 			}
 			const m = PROBE_LINE.exec(line);
@@ -184,7 +200,9 @@ export class KernelClient {
 
 	private readError(e: ErrorEvent): void {
 		if (!this.live) {
-			this.opts.onError(e);
+			// A throw outside a build (the worker's late rethrow of one already reported, or a crash between
+			// builds). settle() has already told the app about the first case, so this one only reaches the log.
+			this.opts.onCrash?.(e);
 			return;
 		}
 		if (this.live.error === null) {
@@ -201,7 +219,9 @@ export class KernelClient {
 		const error = live?.error ?? null;
 		const shrugged = error !== null && SKIPPED_SHAPE.test(error);
 		if (error !== null && (!shrugged || mesh.faceCount === 0)) {
-			if (live?.event) this.opts.onError(live.event);
+			// The app learns about failures exactly once, whether the kernel reported through the patched
+			// console.error or the worker actually threw.
+			this.opts.onError(live?.event ?? new ErrorEvent("error", { message: error }));
 			// The mesh from a build that failed is never the one to show: a partial scene is what tricked the
 			// kernel into complaining in the first place.
 			return this.failed(buildId, error);
@@ -212,6 +232,10 @@ export class KernelClient {
 	}
 
 	private failed(buildId: string, error: string): BuildResult {
+		// The worker wipes modelHistory at the start of every evaluate, including a failing one. Keeping the
+		// previous build's indexing would let preview() address the failed build's history and quietly return
+		// another step's geometry; historyIndex throws now, which the caller shows as a failed preview.
+		this.history = [];
 		return { ok: false, mesh: this.lastMesh, buildId, error };
 	}
 
